@@ -35,46 +35,34 @@ pub const TRANSPARENT_BACKGROUND_KEY: &str = "transparent_background";
 // ---------------------------------------------------------------------------
 // Theme choice catalogs.
 //
-// Canonical names MUST match `ThemeKind::display_name()`.
-// Shared by `theme`, `auto_dark_theme`, and `auto_light_theme`;
-// auto-* sub-pickers drop "auto" to avoid circular reference.
-// Bounded by `MAX_PICKER_CHOICES`.
+// Single source of truth: `ThemeKind::settings_theme_rows()` in pager-render.
+// Settings only maps those rows to `EnumChoice`. Bounded by `MAX_PICKER_CHOICES`.
 // ---------------------------------------------------------------------------
 
-/// Full theme catalog including the "auto" meta-variant. Used by `theme` only.
-const THEME_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "auto",
-        display: "Auto",
-        description: "Follow system dark/light appearance.",
-    },
-    EnumChoice {
-        canonical: "groknight",
-        display: "Grok Night",
-        description: "Neutral dark with magenta accent.",
-    },
-    EnumChoice {
-        canonical: "grokday",
-        display: "Grok Day",
-        description: "Light theme for bright environments.",
-    },
-    EnumChoice {
-        canonical: "tokyonight",
-        display: "Tokyo Night",
-        description: "Dark + blue-tinted; needs truecolor.",
-    },
-    // ASCII "Rose Pine Moon" (not "Rosé") for cross-terminal compatibility.
-    EnumChoice {
-        canonical: "rosepine-moon",
-        display: "Rose Pine Moon",
-        description: "Muted dark with mauve accents; needs truecolor.",
-    },
-    EnumChoice {
-        canonical: "oscura-midnight",
-        display: "Oscura Midnight",
-        description: "Deep dark with warm accents; needs truecolor.",
-    },
-];
+/// Full theme catalog including `auto` (for the `theme` setting).
+fn theme_choices() -> &'static [EnumChoice] {
+    use std::sync::OnceLock;
+    static CHOICES: OnceLock<Vec<EnumChoice>> = OnceLock::new();
+    CHOICES
+        .get_or_init(|| {
+            crate::theme::ThemeKind::settings_theme_rows()
+                .iter()
+                .map(|row| EnumChoice {
+                    canonical: row.canonical,
+                    display: row.display,
+                    description: row.description,
+                })
+                .collect()
+        })
+        .as_slice()
+}
+
+/// Concrete themes only (excludes leading `"auto"`).
+fn concrete_theme_choices() -> &'static [EnumChoice] {
+    let all = theme_choices();
+    debug_assert_eq!(all.first().map(|c| c.canonical), Some("auto"));
+    &all[1..]
+}
 
 // ---------------------------------------------------------------------------
 // Permission-mode catalog.
@@ -474,37 +462,6 @@ const VOICE_STT_LANGUAGE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
-/// Concrete-only theme catalog (excludes "auto"). Used by both
-/// `auto_dark_theme` and `auto_light_theme`. No dark/light filtering —
-/// the user can pair any theme with any system-appearance bucket.
-const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "groknight",
-        display: "Grok Night",
-        description: "Neutral dark with magenta accent.",
-    },
-    EnumChoice {
-        canonical: "grokday",
-        display: "Grok Day",
-        description: "Light theme for bright environments.",
-    },
-    EnumChoice {
-        canonical: "tokyonight",
-        display: "Tokyo Night",
-        description: "Dark + blue-tinted; needs truecolor.",
-    },
-    EnumChoice {
-        canonical: "rosepine-moon",
-        display: "Rose Pine Moon",
-        description: "Muted dark with mauve accents; needs truecolor.",
-    },
-    EnumChoice {
-        canonical: "oscura-midnight",
-        display: "Oscura Midnight",
-        description: "Deep dark with warm accents; needs truecolor.",
-    },
-];
-
 /// Child settings shown inside the "Show contextual hints" group sub-sheet.
 /// Keys match the `[ui.contextual_hints]` serde fields (namespaced so they stay
 /// globally unique — bare `plan_mode` collides with the plan-mode enum row).
@@ -712,7 +669,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Enum {
                 // `Option<String>` — `None` resolved to "groknight".
                 default: "groknight",
-                choices: THEME_CHOICES,
+                choices: theme_choices(),
                 supports_preview: true,
             },
             restart_required: false,
@@ -728,7 +685,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Enum {
                 // `Option<String>` — `None` falls back to "groknight".
                 default: "groknight",
-                choices: CONCRETE_THEME_CHOICES,
+                choices: concrete_theme_choices(),
                 supports_preview: true,
             },
             restart_required: false,
@@ -744,7 +701,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Enum {
                 // `Option<String>` — `None` falls back to "grokday".
                 default: "grokday",
-                choices: CONCRETE_THEME_CHOICES,
+                choices: concrete_theme_choices(),
                 supports_preview: true,
             },
             restart_required: false,

@@ -6,7 +6,7 @@ Grok Build draws all TUI colors from a central theme. You can switch themes whil
 
 ## Available Themes
 
-Grok includes five built-in themes, plus an `auto` option that follows your system appearance.
+Grok includes seven first-class built-in themes, plus an `auto` option that follows your system appearance, plus the full **Ghostty** terminal color-scheme catalog (~590 schemes from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)).
 
 ### Transparent background
 
@@ -25,8 +25,13 @@ When enabled, body and passive panel fills use the host terminal background; acc
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
 | **OscuraMidnight** | `oscura`, `oscura-midnight` | Deep dark base with purple accents. | Yes |
+| **Sakura** | `sakura`, `cherry`, `cherry-blossom` | Ghostty Sakura — dark plum with magenta blossom accents. | Yes |
+| **Aurora** | `aurora`, `northern-lights` | Ghostty Aurora — dark slate with amber/cyan/violet accents. | Yes |
+| **Ghostty catalog** | scheme slug (e.g. `dracula`, `nord`, `catppuccin-latte`) or display name | All other Ghostty/iTerm2 terminal schemes, listed after the built-ins in `/theme` and Settings. | Yes |
 
-Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
+Theme names are case-insensitive. Examples: `/theme dracula`, `/theme nord`, `/theme catppuccin-mocha`. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
+
+Sakura and Aurora are first-class hand-mapped themes (not duplicated in the Ghostty catalog). A few catalog schemes share a slug with a first-class alias (`dark`, `tokyonight`, …); those catalog entries use a `ghostty-` prefix in config (e.g. `ghostty-dark` for the “Dark+” scheme).
 
 ### Minimal Mode Has No Theming
 

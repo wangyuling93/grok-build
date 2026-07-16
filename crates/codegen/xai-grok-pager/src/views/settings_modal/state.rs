@@ -1024,13 +1024,12 @@ pub(super) fn validate_string(
     }
 }
 
-/// Soft product cap on static Enum choices (settings unit tests enforce it).
+/// Soft cap for static Enum catalogs (settings tests enforce it).
 ///
-/// The chooser already scrolls within the viewport when the focused choice
-/// falls off-screen (`picker_scroll_offset`); this limit exists so catalogs
-/// stay intentionally curated rather than unbounded. Sized to fit the full
-/// Grok STT language list (25 codes + client-only `auto` = 26) with headroom.
-pub(crate) const MAX_PICKER_CHOICES: usize = 32;
+/// The chooser scrolls within the viewport. Sized for the full Ghostty theme
+/// catalog (~590 selectable) + built-ins + headroom. Other enums (e.g. STT
+/// languages) stay far below this.
+pub(crate) const MAX_PICKER_CHOICES: usize = 700;
 
 /// The children of a group setting, or an empty slice if `key` is not a group.
 pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'static [SettingKey] {

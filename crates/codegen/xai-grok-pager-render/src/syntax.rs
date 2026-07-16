@@ -144,16 +144,19 @@ pub fn highlight_line(
 /// colors are remapped in [`syntect_to_ratatui_fg`] — do not load a day
 /// theme based on OS/terminal polarity detection.
 pub fn get_syntect() -> &'static Syntect {
-    match crate::theme::Theme::current_kind() {
-        ThemeKind::GrokNight
-        | ThemeKind::RosePineMoon
-        | ThemeKind::OscuraMidnight
-        | ThemeKind::Auto => SYNTECT_GROKNIGHT
-            .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme"))),
+    let kind = crate::theme::Theme::current_kind();
+    // Light canvases (GrokDay + light Ghostty schemes) share the day set;
+    // `ThemeKind::is_dark` is cheap for catalog indices.
+    if matches!(kind, ThemeKind::GrokDay) || (matches!(kind, ThemeKind::Ghostty(_)) && !kind.is_dark())
+    {
+        return SYNTECT_GROKDAY
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme")));
+    }
+    match kind {
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
-        ThemeKind::GrokDay => SYNTECT_GROKDAY
-            .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme"))),
+        _ => SYNTECT_GROKNIGHT
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme"))),
     }
 }
 

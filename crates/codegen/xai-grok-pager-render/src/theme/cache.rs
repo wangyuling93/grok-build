@@ -11,15 +11,15 @@
 //! pager-side in-memory cache + resolution layer only.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::ThemeKind;
 use super::system_appearance;
 
-/// In-memory theme kind, encoded as a `u8` matching the
-/// `ThemeKind` discriminants. Loaded from disk once at startup via
-/// `load_from_disk()`, then kept in sync by `set()`.
-static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::GrokNight as u8);
+/// In-memory theme kind, packed via [`ThemeKind::encode`].
+/// Loaded from disk once at startup via `load_from_disk()`, then kept
+/// in sync by `set()`.
+static CURRENT: AtomicU32 = AtomicU32::new(0); // GrokNight
 static LOADED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(test, feature = "test-support"))]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -50,23 +50,6 @@ pub fn load_transparent_background() -> bool {
 /// Replace the transparent-background flag (optimistic update or rollback).
 pub fn set_transparent_background(enabled: bool) {
     TRANSPARENT_BACKGROUND.store(enabled, Ordering::Relaxed);
-}
-
-/// Decode the u8 stored in `CURRENT` back to a `ThemeKind`. Falls
-/// back to `GrokNight` if the byte is somehow out of range (which
-/// can't happen via `set` — the discriminant is always a valid
-/// variant — but defends against a future variant addition that
-/// forgot to extend this match).
-fn theme_kind_from_u8(byte: u8) -> ThemeKind {
-    match byte {
-        x if x == ThemeKind::GrokNight as u8 => ThemeKind::GrokNight,
-        x if x == ThemeKind::GrokDay as u8 => ThemeKind::GrokDay,
-        x if x == ThemeKind::TokyoNight as u8 => ThemeKind::TokyoNight,
-        x if x == ThemeKind::RosePineMoon as u8 => ThemeKind::RosePineMoon,
-        x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
-        x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
-        _ => ThemeKind::GrokNight,
-    }
 }
 
 /// Cached auto-theme configuration (which themes map to dark/light).
@@ -102,11 +85,11 @@ pub fn current_kind() -> ThemeKind {
         // disk read is idempotent and `store` is atomic. Worst case
         // both threads call `load_from_disk` once.
         if let Some(kind) = load_from_disk() {
-            CURRENT.store(kind as u8, Ordering::Relaxed);
+            CURRENT.store(kind.encode(), Ordering::Relaxed);
         }
         LOADED.store(true, Ordering::Release);
     }
-    theme_kind_from_u8(CURRENT.load(Ordering::Relaxed))
+    ThemeKind::decode(CURRENT.load(Ordering::Relaxed))
 }
 
 /// Set the in-memory theme kind without writing to disk.
@@ -115,7 +98,7 @@ pub fn current_kind() -> ThemeKind {
 /// by the live-preview path during the picker. Disk-write happens via
 /// `Effect::PersistSetting`, NOT here.
 pub fn set(kind: ThemeKind) {
-    CURRENT.store(kind as u8, Ordering::Relaxed);
+    CURRENT.store(kind.encode(), Ordering::Relaxed);
     LOADED.store(true, Ordering::Release);
 }
 
@@ -294,9 +277,8 @@ fn load_auto_theme_config() -> AutoThemeConfig {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_for_test() {
-    // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool
-    // pair is safe to reset without any cross-thread coordination.
-    CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
+    // Tests are serialized via TEST_LOCK so atomics are safe to reset.
+    CURRENT.store(ThemeKind::GrokNight.encode(), Ordering::Relaxed);
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
     TRANSPARENT_BACKGROUND.store(false, Ordering::Relaxed);

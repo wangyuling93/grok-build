@@ -130,12 +130,13 @@ impl SlashCommand for ThemeCommand {
                 CommandResult::Action(Action::SetTheme(kind.display_name().to_string()))
             }
             None => {
-                let all_names: Vec<&str> =
+                let builtins: Vec<&str> =
                     ThemeKind::ALL.iter().map(|k| k.display_name()).collect();
                 CommandResult::Error(format!(
-                    "Unknown theme: {}. Available: auto, {}",
-                    trimmed,
-                    all_names.join(", ")
+                    "Unknown theme: {trimmed}. Built-ins: auto, {}. \
+                     Plus {} Ghostty schemes (try /theme to pick, e.g. /theme dracula).",
+                    builtins.join(", "),
+                    ThemeKind::catalog_picker_count(),
                 ))
             }
         }

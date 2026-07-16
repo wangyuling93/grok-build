@@ -14,125 +14,25 @@ pub mod cache;
 /// Transparent body canvas + solid blend/invert endpoints ([`Theme::design_canvas`], etc.).
 mod canvas;
 pub mod color_support;
+mod aurora;
+mod ghostty;
+mod ghostty_catalog;
 mod grokday;
 mod groknight;
+mod kind;
 pub mod md_style;
 pub mod osc11;
 mod oscura;
 mod rosepine;
+mod sakura;
 pub mod system_appearance;
 mod terminal_default;
 pub mod tokyonight;
 
 pub use color_support::quantize;
+pub use ghostty_catalog::{GhosttyScheme, GHOSTTY_SCHEMES};
+pub use kind::{ThemeKind, ThemePickerRow};
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
-
-/// Available theme variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ThemeKind {
-    GrokNight = 0,
-    GrokDay = 1,
-    TokyoNight = 2,
-    RosePineMoon = 3,
-    OscuraMidnight = 5,
-    /// Meta-variant: follow system dark/light appearance.
-    ///
-    /// Never stored in `cache::CURRENT` — resolved to a concrete
-    /// theme at startup and on live appearance changes. The `"auto"`
-    /// string is stored on disk and in `app.current_ui.theme`, but
-    /// only the resolved concrete kind lives in the cache.
-    /// Excluded from [`ALL`] and [`available()`].
-    Auto = 4,
-}
-
-impl ThemeKind {
-    /// All theme kinds (including those that may not work on the current terminal).
-    pub const ALL: &[ThemeKind] = &[
-        ThemeKind::GrokNight,
-        ThemeKind::GrokDay,
-        ThemeKind::TokyoNight,
-        ThemeKind::RosePineMoon,
-        ThemeKind::OscuraMidnight,
-    ];
-
-    /// Theme kinds available on the current terminal.
-    ///
-    /// Filters out themes that require truecolor when the terminal
-    /// does not support it (e.g., macOS Terminal.app is 256-color).
-    pub fn available() -> &'static [ThemeKind] {
-        // Two possible results — pick the right const slice based on
-        // the detected color level. No heap allocation needed.
-        const ALL: &[ThemeKind] = ThemeKind::ALL;
-        const NO_TRUECOLOR: &[ThemeKind] = &[ThemeKind::GrokNight, ThemeKind::GrokDay];
-
-        if color_support::detect().has_truecolor() {
-            ALL
-        } else {
-            NO_TRUECOLOR
-        }
-    }
-
-    /// Human-readable display name.
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::GrokNight => "groknight",
-            Self::TokyoNight => "tokyonight",
-            Self::GrokDay => "grokday",
-            Self::RosePineMoon => "rosepine-moon",
-            Self::OscuraMidnight => "oscura-midnight",
-            Self::Auto => "auto",
-        }
-    }
-
-    /// Whether this theme requires truecolor (24-bit RGB) to look correct.
-    ///
-    /// TokyoNight uses blue-tinted backgrounds that lose their character
-    /// when quantized to 256 or 16 colors. GrokNight uses neutral grays
-    /// that survive quantization cleanly.
-    pub fn requires_truecolor(self) -> bool {
-        match self {
-            Self::GrokNight => false,
-            Self::TokyoNight => true,
-            Self::GrokDay => false,
-            Self::RosePineMoon => true,
-            Self::OscuraMidnight => true,
-            // Auto is resolved to a concrete theme before rendering.
-            Self::Auto => false,
-        }
-    }
-
-    /// Parse a theme name (case-insensitive). All string→ThemeKind
-    /// conversions must go through this function.
-    pub fn from_name(name: &str) -> Option<Self> {
-        let lower = name.to_lowercase();
-        match lower.as_str() {
-            "auto" | "system" => Some(Self::Auto),
-            "groknight" | "grok-night" | "dark" => Some(Self::GrokNight),
-            "tokyonight" | "tokyo-night" | "tokyo" => Some(Self::TokyoNight),
-            "grokday" | "grok-day" | "light" | "day" => Some(Self::GrokDay),
-            "rosepine" | "rose-pine" | "rosepine-moon" | "rose-pine-moon" => {
-                Some(Self::RosePineMoon)
-            }
-            "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
-            _ => None,
-        }
-    }
-
-    /// Whether this is the meta "auto" variant (resolved at runtime).
-    #[must_use]
-    pub fn is_auto(self) -> bool {
-        self == Self::Auto
-    }
-}
-
-/// `FromStr` wrapper around [`ThemeKind::from_name`].
-impl std::str::FromStr for ThemeKind {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_name(s).ok_or(())
-    }
-}
 
 /// Resolve a theme string to its canonical `&'static str` name.
 /// Used by both dispatch and registry layers.
@@ -143,14 +43,9 @@ pub fn canonical_name(value: &str) -> Option<&'static str> {
 /// Human-friendly display name for a canonical theme value (e.g.
 /// `"groknight"` → `"Grok Night"`). Falls back to `value` verbatim.
 pub fn display_name_for_canonical(value: &str) -> &str {
-    match value {
-        "auto" => "Auto",
-        "groknight" => "Grok Night",
-        "grokday" => "Grok Day",
-        "tokyonight" => "Tokyo Night",
-        "rosepine-moon" => "Rose Pine Moon",
-        other => other,
-    }
+    ThemeKind::from_name(value)
+        .map(|k| k.label())
+        .unwrap_or(value)
 }
 
 impl Default for Theme {
@@ -272,16 +167,9 @@ impl Theme {
         if cache::terminal_native_locked() {
             return Self::terminal_default().quantized(level);
         }
-        let base = match cache::current_kind() {
-            ThemeKind::GrokNight => Self::groknight(),
-            ThemeKind::TokyoNight => Self::tokyonight(),
-            ThemeKind::GrokDay => Self::grokday(),
-            ThemeKind::RosePineMoon => Self::rosepine_moon(),
-            ThemeKind::OscuraMidnight => Self::oscura_midnight(),
-            // Auto is resolved to a concrete theme before being stored;
-            // if reached, fall back to GrokNight.
-            ThemeKind::Auto => Self::groknight(),
-        };
+        // Auto is resolved to a concrete theme before being stored;
+        // if reached, `to_theme` falls back to GrokNight.
+        let base = cache::current_kind().to_theme();
         // Sample polarity pre-quantization — post-quantize `bg_base` may
         // land on a named/indexed entry whose luminance is host-palette-
         // dependent.
@@ -675,62 +563,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_name_auto() {
-        assert_eq!(ThemeKind::from_name("auto"), Some(ThemeKind::Auto));
-    }
-
-    #[test]
-    fn from_name_system() {
-        assert_eq!(ThemeKind::from_name("system"), Some(ThemeKind::Auto));
-    }
-
-    #[test]
-    fn from_name_auto_case_insensitive() {
-        assert_eq!(ThemeKind::from_name("AUTO"), Some(ThemeKind::Auto));
-        assert_eq!(ThemeKind::from_name("Auto"), Some(ThemeKind::Auto));
-        assert_eq!(ThemeKind::from_name("SYSTEM"), Some(ThemeKind::Auto));
-    }
-
-    #[test]
-    fn display_name_auto() {
-        assert_eq!(ThemeKind::Auto.display_name(), "auto");
-    }
-
-    #[test]
-    fn is_auto_returns_true_for_auto() {
-        assert!(ThemeKind::Auto.is_auto());
-    }
-
-    #[test]
-    fn is_auto_returns_false_for_concrete_variants() {
-        assert!(!ThemeKind::GrokNight.is_auto());
-        assert!(!ThemeKind::GrokDay.is_auto());
-        assert!(!ThemeKind::TokyoNight.is_auto());
-        assert!(!ThemeKind::RosePineMoon.is_auto());
-        assert!(!ThemeKind::OscuraMidnight.is_auto());
-    }
-
-    #[test]
-    fn all_excludes_auto() {
-        assert!(!ThemeKind::ALL.contains(&ThemeKind::Auto));
-    }
-
-    #[test]
-    fn available_excludes_auto() {
-        assert!(!ThemeKind::available().contains(&ThemeKind::Auto));
-    }
-
-    #[test]
-    fn is_dark_classifies_built_in_themes() {
-        // Sanity-check the polarity sampler against the theme catalog.
-        assert!(Theme::groknight().is_dark());
-        assert!(Theme::tokyonight().is_dark());
-        assert!(Theme::rosepine_moon().is_dark());
-        assert!(Theme::oscura_midnight().is_dark());
-        assert!(!Theme::grokday().is_dark());
-    }
-
-    #[test]
     fn ansi16_overrides_dark_uses_bright_white_high_contrast() {
         use ratatui::style::Color;
         let t = Theme::groknight().ansi16_chrome_overrides(true);
@@ -1003,14 +835,7 @@ mod tests {
             r as i32 + g as i32 + b as i32
         };
         for &kind in ThemeKind::ALL {
-            let theme = match kind {
-                ThemeKind::GrokNight => Theme::groknight(),
-                ThemeKind::GrokDay => Theme::grokday(),
-                ThemeKind::TokyoNight => Theme::tokyonight(),
-                ThemeKind::RosePineMoon => Theme::rosepine_moon(),
-                ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
-                ThemeKind::Auto => unreachable!("ALL excludes Auto"),
-            };
+            let theme = kind.to_theme();
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);
             let thumb = lum(theme.scrollbar_fg, "scrollbar_fg", kind);
             let delta = thumb - track;
@@ -1092,11 +917,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_does_not_require_truecolor() {
-        assert!(!ThemeKind::Auto.requires_truecolor());
-    }
-
-    #[test]
     fn resolve_to_rgb_handles_rgb_indexed_named_and_reset() {
         use crate::render::color::{indexed_to_rgb, resolve_to_rgb};
         use ratatui::style::Color;
@@ -1134,69 +954,4 @@ mod tests {
         assert_eq!(resolve_to_rgb(Color::Reset), None);
     }
 
-    #[test]
-    fn from_name_concrete_variants_still_work() {
-        assert_eq!(
-            ThemeKind::from_name("groknight"),
-            Some(ThemeKind::GrokNight)
-        );
-        assert_eq!(ThemeKind::from_name("dark"), Some(ThemeKind::GrokNight));
-        assert_eq!(ThemeKind::from_name("grokday"), Some(ThemeKind::GrokDay));
-        assert_eq!(ThemeKind::from_name("light"), Some(ThemeKind::GrokDay));
-        assert_eq!(
-            ThemeKind::from_name("tokyonight"),
-            Some(ThemeKind::TokyoNight)
-        );
-        assert_eq!(
-            ThemeKind::from_name("rosepine"),
-            Some(ThemeKind::RosePineMoon)
-        );
-        assert_eq!(
-            ThemeKind::from_name("oscura"),
-            Some(ThemeKind::OscuraMidnight)
-        );
-        assert_eq!(
-            ThemeKind::from_name("oscura-midnight"),
-            Some(ThemeKind::OscuraMidnight)
-        );
-    }
-
-    /// `FromStr` agrees with `from_name` for all canonicals + aliases.
-    #[test]
-    fn from_str_matches_from_name_for_all_canonicals() {
-        // Mapping `from_name`'s alias matrix into the `FromStr` API.
-        let cases = [
-            ("auto", ThemeKind::Auto),
-            ("system", ThemeKind::Auto),
-            ("groknight", ThemeKind::GrokNight),
-            ("grok-night", ThemeKind::GrokNight),
-            ("dark", ThemeKind::GrokNight),
-            ("tokyonight", ThemeKind::TokyoNight),
-            ("tokyo-night", ThemeKind::TokyoNight),
-            ("tokyo", ThemeKind::TokyoNight),
-            ("grokday", ThemeKind::GrokDay),
-            ("grok-day", ThemeKind::GrokDay),
-            ("light", ThemeKind::GrokDay),
-            ("day", ThemeKind::GrokDay),
-            ("rosepine", ThemeKind::RosePineMoon),
-            ("rose-pine", ThemeKind::RosePineMoon),
-            ("rosepine-moon", ThemeKind::RosePineMoon),
-            ("rose-pine-moon", ThemeKind::RosePineMoon),
-        ];
-        for (name, expected) in cases {
-            assert_eq!(
-                name.parse::<ThemeKind>(),
-                Ok(expected),
-                "name `{name}` must parse to {expected:?}",
-            );
-            // Case-insensitive symmetry.
-            assert_eq!(
-                name.to_uppercase().parse::<ThemeKind>(),
-                Ok(expected),
-                "name `{name}` (upper) must parse to {expected:?}",
-            );
-        }
-        assert_eq!("nonexistent".parse::<ThemeKind>(), Err(()));
-        assert_eq!("".parse::<ThemeKind>(), Err(()));
-    }
 }

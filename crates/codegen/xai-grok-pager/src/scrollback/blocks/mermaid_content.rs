@@ -143,14 +143,15 @@ pub fn mermaid_block_ranges(view: &MarkdownRenderView) -> Vec<Range<usize>> {
 
 /// Whether a theme renders diagrams on a dark surface.
 ///
-/// `GrokDay` is the only light theme; every other concrete theme (and the
-/// `GrokNight` default that `Auto` resolves to before it reaches the cache) is
-/// dark. The render worker maps this to `xai_grok_mermaid::MermaidTheme`; it
-/// lives here (rather than referencing the engine crate) so the
-/// always-compiled detection module stays independent of the optional
-/// `mermaid` feature.
+/// Designed dark/light polarity for mermaid rendering.
+///
+/// Delegates to [`ThemeKind::is_dark`] so new light themes stay correct
+/// without hard-coding a kind list. The render worker maps this to
+/// `xai_grok_mermaid::MermaidTheme`; it lives here (rather than referencing
+/// the engine crate) so the always-compiled detection module stays
+/// independent of the optional `mermaid` feature.
 pub fn theme_is_dark(theme: ThemeKind) -> bool {
-    !matches!(theme, ThemeKind::GrokDay)
+    theme.is_dark()
 }
 
 /// Cache key for a rendered diagram: content hash + theme + quality tier +
@@ -213,7 +214,9 @@ impl MermaidCacheKey {
         let _ = write!(
             name,
             "-{}-{}-{}-r{RENDER_REVISION}.png",
-            self.theme as u8, self.width_bucket, quality_tag
+            self.theme.encode(),
+            self.width_bucket,
+            quality_tag
         );
         name
     }
@@ -221,7 +224,8 @@ impl MermaidCacheKey {
 
 /// Render-pipeline revision baked into [`MermaidCacheKey::cache_filename`];
 /// bump whenever the renderer's output changes for the same source/theme/width/tier.
-const RENDER_REVISION: u8 = 3;
+/// v4: theme key uses [`ThemeKind::encode`] (Ghostty catalog indices).
+const RENDER_REVISION: u8 = 4;
 
 /// Detected Mermaid diagrams for one agent message.
 ///
@@ -825,7 +829,7 @@ mod tests {
     // -- theme mapping + cache filename --------------------------------------
 
     #[test]
-    fn theme_is_dark_maps_grokday_to_light_only() {
+    fn theme_is_dark_maps_light_themes_correctly() {
         assert!(
             !theme_is_dark(ThemeKind::GrokDay),
             "GrokDay is the light theme"
@@ -835,8 +839,14 @@ mod tests {
             ThemeKind::TokyoNight,
             ThemeKind::RosePineMoon,
             ThemeKind::OscuraMidnight,
+            ThemeKind::Sakura,
+            ThemeKind::Aurora,
         ] {
             assert!(theme_is_dark(dark), "{dark:?} should be dark");
+        }
+        // Sample a known-dark Ghostty scheme if the catalog is present.
+        if let Some(kind) = ThemeKind::from_name("dracula") {
+            assert!(theme_is_dark(kind), "dracula should be dark");
         }
     }
 
