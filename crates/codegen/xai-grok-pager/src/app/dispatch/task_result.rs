@@ -1098,6 +1098,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::TransparentBackgroundPersistCoalesced { generation } => {
+            tracing::debug!(
+                target: "settings",
+                generation,
+                latest_generation = app.transparency_persist_generation,
+                "transparency persist coalesced (no disk write)"
+            );
+            vec![]
+        }
         TaskResult::TransparentBackgroundPersistFailed {
             rollback_value,
             generation,

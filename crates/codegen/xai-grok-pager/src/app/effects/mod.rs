@@ -1893,14 +1893,16 @@ pub(crate) fn execute(
             rollback_value,
             generation,
         } => {
-            tasks.spawn(async move {
-                transparency_persist::persist_transparent_background(
+            // `register` mutates process-wide desired state on this thread
+            // before spawn, so dispatch order — not poll order — wins.
+            tasks.spawn(
+                transparency_persist::TransparencyPersist::register(
                     value,
                     rollback_value,
                     generation,
                 )
-                .await
-            });
+                .run(),
+            );
         }
         Effect::Authenticate {
             request_seq,

@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn transparency_cannot_change_in_either_direction_while_a_turn_runs() {
+fn transparent_command_and_setting_are_rejected_while_a_stream_is_active() {
     let _guard = crate::theme::cache::test_lock()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
@@ -14,14 +14,14 @@ fn transparency_cannot_change_in_either_direction_while_a_turn_runs() {
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
 
     let opaque_key = crate::theme::cache::render_key();
-    let effects = dispatch(Action::ToggleTransparentBackground, &mut app);
-    assert!(effects.is_empty(), "a rejected toggle must not persist");
+    let effects = dispatch(Action::SendPrompt("/transparent".into()), &mut app);
+    assert!(effects.is_empty(), "a rejected command must not persist");
     assert_eq!(app.current_ui.transparent_background, None);
     assert_eq!(app.transparency_persist_generation, 0);
     assert_eq!(crate::theme::cache::render_key(), opaque_key);
     assert_eq!(
         read_toast(&app),
-        "Cannot change transparency while a task is running"
+        "Cannot change transparency while a stream or task is active"
     );
 
     // Exercise the reverse direction through the settings-modal action.

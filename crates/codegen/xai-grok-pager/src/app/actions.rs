@@ -2737,8 +2737,14 @@ pub enum TaskResult {
         error: String,
     },
     /// Transparency persisted successfully for the given request generation.
+    /// Only emitted when this task actually wrote `value` to disk.
     TransparentBackgroundPersisted {
         value: bool,
+        generation: u64,
+    },
+    /// This generation was superseded (or already handled) and performed no
+    /// disk write. JoinSet drain only; AppView treats it as a pure no-op.
+    TransparentBackgroundPersistCoalesced {
         generation: u64,
     },
     /// Transparency persistence failed for the given request generation.

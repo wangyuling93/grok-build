@@ -863,9 +863,10 @@ pub(super) fn set_transparent_background_inner(app: &mut AppView, new: bool) {
     crate::theme::cache::set_transparent_background(new);
 }
 
-/// Whether changing the process-wide terminal paint mode would disrupt work
-/// that is still actively running (turns, background tasks, live subagents).
-/// Idle scheduled loops do not block: they are not currently painting output.
+/// Whether changing the process-wide terminal paint mode would disrupt an
+/// active output stream or other running work (turns, commands, background
+/// tasks, live subagents). Idle scheduled loops do not block: they are not
+/// currently painting output.
 pub(super) fn transparency_change_blocked(app: &AppView) -> bool {
     fn agent_has_running_task(agent: &crate::app::agent_view::AgentView) -> bool {
         agent.session.state.is_busy()
@@ -893,7 +894,7 @@ pub(in crate::app::dispatch) fn set_transparent_background(
         return vec![];
     }
     if transparency_change_blocked(app) {
-        app.show_toast("Cannot change transparency while a task is running");
+        app.show_toast("Cannot change transparency while a stream or task is active");
         return vec![];
     }
     app.transparency_persist_generation = app.transparency_persist_generation.wrapping_add(1);
