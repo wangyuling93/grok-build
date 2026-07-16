@@ -1331,6 +1331,9 @@ pub(crate) async fn run(
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
     // Prime thread-local caches so first render doesn't hit disk.
     crate::appearance::cache::prime(&app.current_ui);
+    // Theme paint flags (transparent body, …) — owned by theme::cache, not
+    // appearance, so Theme::current does not depend on the appearance module.
+    crate::theme::cache::set_transparent_background(app.current_ui.transparent_background);
     // Re-derive the render-value compact flag from the hydrated `current_ui`:
     // the seed above used the pre-hydration disk read, which layered/remote
     // config can contradict — the canonical single-writer corrects it (and

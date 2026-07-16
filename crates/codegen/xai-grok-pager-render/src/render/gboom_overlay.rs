@@ -11,22 +11,28 @@ use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use crate::gboom::GboomHud;
 use crate::render::safe_buf::SafeBuf;
+use crate::theme::Theme;
 
 /// Render the GBOOM popup chrome. Returns the popup `Rect`,
 /// or `None` if the area is too small to play in.
+///
+/// Chrome fill uses `theme.bg_base` (see-through under transparent mode);
+/// backdrop dimming uses [`Theme::design_canvas`].
 pub fn render_gboom_overlay(
     buf: &mut Buffer,
     area: Rect,
     hud: &GboomHud,
-    bg: Color,
-    text_fg: Color,
-    border_fg: Color,
+    theme: &Theme,
 ) -> Option<Rect> {
     if area.height < 8 || area.width < 30 {
         return None;
     }
 
-    crate::render::color::dim_area(buf, area, bg, 0.5);
+    let bg = theme.bg_base;
+    let text_fg = theme.text_primary;
+    let border_fg = theme.gray_dim;
+
+    crate::render::color::dim_area(buf, area, theme.design_canvas(), 0.5);
 
     // 90% centered popup, like the video viewer.
     let popup_width = ((area.width as u32 * 90) / 100)
@@ -134,16 +140,9 @@ mod tests {
     #[test]
     fn returns_none_when_area_too_small() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 5));
+        let theme = Theme::groknight();
         assert!(
-            render_gboom_overlay(
-                &mut buf,
-                Rect::new(0, 0, 20, 5),
-                &hud(),
-                Color::Black,
-                Color::White,
-                Color::Gray,
-            )
-            .is_none()
+            render_gboom_overlay(&mut buf, Rect::new(0, 0, 20, 5), &hud(), &theme).is_none()
         );
     }
 
@@ -151,15 +150,9 @@ mod tests {
     fn renders_popup_with_title_and_hud() {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        let popup = render_gboom_overlay(
-            &mut buf,
-            area,
-            &hud(),
-            Color::Black,
-            Color::White,
-            Color::Gray,
-        )
-        .expect("popup should render");
+        let theme = Theme::groknight();
+        let popup =
+            render_gboom_overlay(&mut buf, area, &hud(), &theme).expect("popup should render");
         assert!(popup.width >= 30);
 
         let content: String = buf.content().iter().map(|c| c.symbol()).collect();

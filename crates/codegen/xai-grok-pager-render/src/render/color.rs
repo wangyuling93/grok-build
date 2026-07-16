@@ -186,7 +186,17 @@ pub fn blend_channel(base: u8, original: u8, opacity: f32) -> u8 {
 /// 256-color index so the output stays terminal-compatible.
 ///
 /// Returns `None` for named ANSI colors (Color::Red, etc.) since their RGB
-/// values are terminal-dependent.
+/// values are terminal-dependent — **and** for [`Color::Reset`].
+///
+/// # Theme-relative UI blends
+///
+/// For dim/fade/hover against a theme paint surface that may be
+/// [`Color::Reset`] under transparent or terminal-native modes, prefer
+/// [`crate::theme::Theme::blend`] / [`Theme::blend_canvas`] (or pass
+/// [`Theme::design_canvas`] / [`Theme::solid_paint`] into area helpers)
+/// over calling this with paint `bg_base` directly. Raw
+/// `blend_color(theme.bg_base, …)` silently no-ops when the body is
+/// transparent.
 pub fn blend_color(base: Color, original: Color, opacity: f32) -> Option<Color> {
     let (base_r, base_g, base_b) = color_to_rgb(base)?;
     let (orig_r, orig_g, orig_b) = color_to_rgb(original)?;
@@ -273,6 +283,9 @@ pub fn blend_line_with_default(
 ///
 /// Both RGB and Indexed colors are blended; named ANSI colors (Color::Red, etc.)
 /// are left unchanged since their RGB values are terminal-dependent.
+///
+/// For body-canvas fades under transparent themes, pass
+/// [`crate::theme::Theme::design_canvas`], not paint `bg_base`.
 pub fn fade_region(buf: &mut Buffer, area: Rect, base_color: Color, opacity: f32) {
     blend_area(
         buf,
@@ -291,6 +304,10 @@ pub fn fade_region(buf: &mut Buffer, area: Rect, base_color: Color, opacity: f32
 ///   - `opacity = 1.0`: no change (original kept)
 ///
 /// Both RGB and Indexed colors are blended; named ANSI color cells are skipped.
+///
+/// When the target is a theme surface that may be [`Color::Reset`], resolve it
+/// first with [`crate::theme::Theme::solid_paint`] or
+/// [`crate::theme::Theme::design_canvas`].
 pub fn blend_area(
     buf: &mut Buffer,
     area: Rect,
@@ -318,6 +335,9 @@ pub fn blend_area(
 /// Dim a screen area: reset all modifiers then blend toward a background color.
 ///
 /// This ensures no bold/italic/underline bleeds through the dimmed overlay.
+///
+/// For body-canvas dim under transparent themes, pass
+/// [`crate::theme::Theme::design_canvas`], not paint `bg_base`.
 pub fn dim_area(buf: &mut Buffer, area: Rect, blend_bg: ratatui::style::Color, blend_factor: f32) {
     use ratatui::style::Modifier;
 

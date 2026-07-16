@@ -7,7 +7,6 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 
 use crate::appearance::AppearanceConfig;
-use crate::render::color::blend_color;
 use crate::render::{Renderable, SafeBuf};
 use crate::scrollback::BlockOutput;
 use crate::scrollback::block::{BlockContent, RenderBlock};
@@ -212,7 +211,7 @@ impl<'a> EntryRenderer<'a> {
         .areas(area);
 
         let display_cfg = &self.appearance.scrollback.display;
-        let bg = self.theme.bg_base;
+        let theme = self.theme;
 
         // Verb-group header: aggregated "Verb N noun" label with run-state
         // accent (error > running wave > dimmed tool accent). The diamond
@@ -220,14 +219,14 @@ impl<'a> EntryRenderer<'a> {
         // the same wave as a running tool row's bullet.
         if let Some(GroupHeaderLabel::VerbRun(vg)) = self.group_header_label {
             let glyph_color = if vg.failed {
-                let style = Style::default().fg(self.theme.accent_error);
+                let style = Style::default().fg(theme.accent_error);
                 buf.set_string_safe(
                     accent_area.x,
                     accent_area.y,
                     crate::glyphs::accent_bar(),
                     style,
                 );
-                self.theme.accent_error
+                theme.accent_error
             } else if vg.running {
                 let brightness = theme::wave_brightness(
                     self.tick,
@@ -235,8 +234,9 @@ impl<'a> EntryRenderer<'a> {
                     self.appearance.animation.wave_rows,
                     WAVE_SPEED,
                 );
-                let color = blend_color(bg, self.theme.accent_tool, brightness)
-                    .unwrap_or(self.theme.accent_tool);
+                let color = theme
+                    .blend_canvas(theme.accent_tool, brightness)
+                    .unwrap_or(theme.accent_tool);
                 buf.set_string_safe(
                     accent_area.x,
                     accent_area.y,
@@ -245,15 +245,16 @@ impl<'a> EntryRenderer<'a> {
                 );
                 color
             } else {
-                let dimmed = blend_color(bg, self.theme.accent_tool, display_cfg.dim_accent)
-                    .unwrap_or(self.theme.accent_tool);
+                let dimmed = theme
+                    .blend_canvas(theme.accent_tool, display_cfg.dim_accent)
+                    .unwrap_or(theme.accent_tool);
                 buf.set_string_safe(
                     accent_area.x,
                     accent_area.y,
                     &display_cfg.collapsed_accent_char,
                     Style::default().fg(dimmed),
                 );
-                self.theme.gray
+                theme.gray
             };
             // Diamond chrome in BOTH states — same family as the "N more"
             // headers. The selection caret (the expandable indicator in
@@ -271,8 +272,10 @@ impl<'a> EntryRenderer<'a> {
 
         // Render dimmed accent char — use theme.accent_tool directly instead of
         // going through self.accent() which creates a full BlockContext.
-        let accent_color = self.theme.accent_tool;
-        let dimmed = blend_color(bg, accent_color, display_cfg.dim_accent).unwrap_or(accent_color);
+        let accent_color = theme.accent_tool;
+        let dimmed = theme
+            .blend_canvas(accent_color, display_cfg.dim_accent)
+            .unwrap_or(accent_color);
         let style = Style::default().fg(dimmed);
         buf.set_string_safe(
             accent_area.x,
@@ -812,7 +815,7 @@ impl Renderable for EntryRenderer<'_> {
                 }
             } else if accent_style.animated {
                 // Animated accents: wave effect (running blocks)
-                let bg = bg_color.unwrap_or(self.fallback_bg());
+                let paint = bg_color.unwrap_or_else(|| self.fallback_bg());
                 let wave_rows = self.appearance.animation.wave_rows;
 
                 for row in 0..accent_area.height {
@@ -820,7 +823,10 @@ impl Renderable for EntryRenderer<'_> {
                     let logical_row = skip_rows + row;
                     let brightness =
                         theme::wave_brightness(self.tick, logical_row, wave_rows, WAVE_SPEED);
-                    let animated_color = blend_color(bg, color, brightness).unwrap_or(color);
+                    let animated_color = self
+                        .theme
+                        .blend(paint, color, brightness)
+                        .unwrap_or(color);
                     let style = Style::default().fg(animated_color);
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
@@ -828,8 +834,14 @@ impl Renderable for EntryRenderer<'_> {
                 // Dimmed collapsed accent: thin char + blended color.
                 // When the entry is selected, fall through to the static
                 // full-color branch so the selection reads as undimmed.
-                let bg = bg_color.unwrap_or(self.fallback_bg());
-                let dimmed = blend_color(bg, color, display_cfg.dim_accent).unwrap_or(color);
+                let dimmed = self
+                    .theme
+                    .blend(
+                        bg_color.unwrap_or_else(|| self.fallback_bg()),
+                        color,
+                        display_cfg.dim_accent,
+                    )
+                    .unwrap_or(color);
                 let style = Style::default().fg(dimmed);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(
@@ -985,11 +997,16 @@ impl Renderable for EntryRenderer<'_> {
             } else if let Some(style) = bullet_style {
                 if style.animated {
                     // Animated bullet: wave effect synced with accent
-                    let bg = bg_color.unwrap_or(self.fallback_bg());
                     let wave_rows = self.appearance.animation.wave_rows;
                     let brightness = theme::wave_brightness(self.tick, 0, wave_rows, WAVE_SPEED);
-                    let animated_color =
-                        blend_color(bg, style.color, brightness).unwrap_or(style.color);
+                    let animated_color = self
+                        .theme
+                        .blend(
+                            bg_color.unwrap_or_else(|| self.fallback_bg()),
+                            style.color,
+                            brightness,
+                        )
+                        .unwrap_or(style.color);
                     if let Some(cell) = buf.cell_mut((content_area.x, bullet_y)) {
                         cell.fg = animated_color;
                     }
@@ -1000,9 +1017,14 @@ impl Renderable for EntryRenderer<'_> {
                     // Collapsed groupable with colored bullet: dim it.
                     // When selected, keep the bullet at its original full
                     // color so the selection reads as undimmed.
-                    let bg = bg_color.unwrap_or(self.fallback_bg());
-                    let dimmed =
-                        blend_color(bg, style.color, display_cfg.dim_accent).unwrap_or(style.color);
+                    let dimmed = self
+                        .theme
+                        .blend(
+                            bg_color.unwrap_or_else(|| self.fallback_bg()),
+                            style.color,
+                            display_cfg.dim_accent,
+                        )
+                        .unwrap_or(style.color);
                     if let Some(cell) = buf.cell_mut((content_area.x, bullet_y)) {
                         cell.fg = dimmed;
                     }

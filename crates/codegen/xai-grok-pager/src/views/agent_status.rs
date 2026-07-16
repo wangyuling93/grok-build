@@ -253,7 +253,7 @@ pub fn goal_status_line(
     // Paused goals use an inverted warning-colour chip so the chip background
     // visually matches the modal's `theme.warning` status row.
     let mut label_style = if goal.status.is_paused() {
-        Style::default().fg(theme.bg_base).bg(theme.warning)
+        Style::default().fg(theme.invert_canvas()).bg(theme.warning)
     } else {
         Style::default().fg(theme.accent_plan).bg(theme.bg_base)
     };

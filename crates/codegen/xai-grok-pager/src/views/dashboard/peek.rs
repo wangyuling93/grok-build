@@ -745,7 +745,12 @@ pub fn render_peek_panel(
         // focused (Tab → row nav) so it's clear the options aren't a live
         // answer surface. The border already dims; this fades the content.
         if !panel.focused {
-            crate::render::color::blend_area(buf, frame_inner, Some((theme.bg_base, 0.45)), None);
+            crate::render::color::blend_area(
+                buf,
+                frame_inner,
+                Some((theme.design_canvas(), 0.45)),
+                None,
+            );
         }
         // No reply row in question mode — return the feedback caret (if
         // the user is typing into the reject option).
@@ -904,7 +909,12 @@ pub fn render_peek_panel(
     // input isn't active. Caret is `None` when unfocused, so dimming the
     // painted cells doesn't affect cursor placement.
     if !panel.focused {
-        crate::render::color::blend_area(buf, frame_inner, Some((theme.bg_base, 0.45)), None);
+        crate::render::color::blend_area(
+            buf,
+            frame_inner,
+            Some((theme.design_canvas(), 0.45)),
+            None,
+        );
     }
     PeekRenderResult { caret, reply_rect }
 }
@@ -1761,7 +1771,8 @@ mod tests {
         // a no-op there (the border still dims). Only assert the content
         // fade when the active theme actually supports blending.
         let blend_supported =
-            crate::render::color::blend_color(theme.bg_base, theme.text_primary, 0.45).is_some();
+            theme.blend_canvas(theme.text_primary, 0.45)
+                .is_some();
         if blend_supported {
             assert!(
                 content_differs,

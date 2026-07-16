@@ -26,6 +26,7 @@
 pub mod defs;
 pub mod registry;
 
+pub use defs::TRANSPARENT_BACKGROUND_KEY;
 pub use registry::{
     DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
     SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry,

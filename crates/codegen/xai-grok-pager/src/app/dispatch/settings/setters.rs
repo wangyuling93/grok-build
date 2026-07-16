@@ -857,6 +857,37 @@ pub(in crate::app::dispatch) fn set_compact_mode(app: &mut AppView, new: bool) -
     }]
 }
 
+/// State-only mutation for `transparent_background`.
+pub(super) fn set_transparent_background_inner(app: &mut AppView, new: bool) {
+    app.current_ui.transparent_background = new;
+    crate::theme::cache::set_transparent_background(new);
+}
+
+/// Set transparent terminal background. Idempotent: skips if `new == prev`.
+pub(in crate::app::dispatch) fn set_transparent_background(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.transparent_background;
+    if prev == new {
+        return vec![];
+    }
+    set_transparent_background_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
+        value = new,
+        "setting changed"
+    );
+    app.show_toast(&save_success_toast("Transparent background", new));
+    vec![Effect::PersistSetting {
+        key: crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 /// State-only mutation for `show_timestamps`. Idempotent fast path
 /// mirrors `set_compact_mode_inner`.
 pub(super) fn set_timestamps_inner(app: &mut AppView, new: bool) {

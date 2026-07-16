@@ -1247,7 +1247,7 @@ pub fn render_line_viewer(
 
     // 1. Dim the entire screen behind the popup (skip when fullscreen).
     if should_dim {
-        dim_area(buf, full_area, theme.bg_base, 0.5);
+        dim_area(buf, full_area, theme.design_canvas(), 0.5);
     }
 
     // 2. Clear the popup area.
@@ -1451,7 +1451,7 @@ pub fn render_line_viewer(
             };
         if let Some((lo, hi)) = highlight_range {
             let blend_bg =
-                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.15)
+                theme.blend_canvas(theme.accent_plan, 0.15)
                     .unwrap_or(theme.accent_plan);
             // Stop the highlight one column before the scrollbar so
             // the gap + track stay readable instead of being tinted

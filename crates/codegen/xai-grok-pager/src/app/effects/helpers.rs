@@ -784,6 +784,18 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        crate::settings::defs::TRANSPARENT_BACKGROUND_KEY => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_transparent_background(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "show_timestamps" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));

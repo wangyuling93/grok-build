@@ -11,6 +11,8 @@
 //! highlighting, blending) are also quantized via [`color_support::quantize`].
 
 pub mod cache;
+/// Transparent body canvas + solid blend/invert endpoints ([`Theme::design_canvas`], etc.).
+mod canvas;
 pub mod color_support;
 mod grokday;
 mod groknight;
@@ -174,6 +176,7 @@ impl Theme {
             bg_highlight: q(self.bg_highlight),
             bg_hover: q(self.bg_hover),
             bg_terminal: q(self.bg_terminal),
+            canvas: q(self.canvas),
 
             accent_user: q(self.accent_user),
             accent_assistant: q(self.accent_assistant),
@@ -301,14 +304,17 @@ impl Theme {
         // explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides`
         // would repaint `Color::Reset` slots with named ANSI colors and
         // partially defeat the user's opt-out on ConHost.
-        if level.has_color()
+        let adapted = if level.has_color()
             && (level == color_support::ColorLevel::Basic
                 || (crate::glyphs::is_legacy_windows_console() && !level.has_truecolor()))
         {
             adapted.ansi16_chrome_overrides(dark)
         } else {
             adapted
-        }
+        };
+        // Paint-time modes (transparent body, …) — shared with tests via
+        // [`Theme::apply_paint_mode`].
+        adapted.apply_paint_mode()
     }
 
     /// Get the currently active theme kind.
@@ -379,7 +385,9 @@ impl Theme {
             Color::Rgb(nudge(cr), nudge(cg), nudge(cb))
         }
 
-        let bg = self.bg_base;
+        // Use the design canvas. When it is Reset (terminal-native),
+        // `push_away` leaves elevated colors unchanged (non-RGB base).
+        let bg = self.design_canvas();
         let user_block_push = if dark { 28 } else { 8 };
         Self {
             bg_light: push_away(bg, self.bg_light, user_block_push),
@@ -406,18 +414,34 @@ impl Theme {
             .add_modifier(ratatui::style::Modifier::ITALIC)
     }
 
-    /// True when `bg_base` reads as dark per BT.709 luminance. Must be
-    /// called pre-quantization while `bg_base` is still RGB; named/Reset
-    /// fall back to "dark" (the default theme polarity).
+    /// True when this theme is designed for a dark canvas.
+    ///
+    /// Prefers solid `bg_base`, then the design canvas from
+    /// [`Self::design_canvas`] (so transparent mode + Basic quantize still
+    /// read polarity from the design canvas, not named ANSI text).
+    /// Terminal-native (both Reset) defaults to dark.
     pub fn is_dark(&self) -> bool {
         use ratatui::style::Color;
-        let (r, g, b) = match self.bg_base {
-            Color::Rgb(r, g, b) => (r, g, b),
-            Color::Indexed(n) => crate::render::color::indexed_to_rgb(n),
-            _ => return true,
+        let classify = |r: u8, g: u8, b: u8| {
+            crate::theme::osc11::classify_luminance(r, g, b)
+                == crate::theme::system_appearance::SystemAppearance::Dark
         };
-        crate::theme::osc11::classify_luminance(r, g, b)
-            == crate::theme::system_appearance::SystemAppearance::Dark
+        let from_color = |c: Color| -> Option<bool> {
+            match c {
+                Color::Rgb(r, g, b) => Some(classify(r, g, b)),
+                Color::Indexed(n) => {
+                    let (r, g, b) = crate::render::color::indexed_to_rgb(n);
+                    Some(classify(r, g, b))
+                }
+                // Named ANSI after Basic quantize / chrome overrides.
+                Color::Black | Color::DarkGray => Some(true),
+                Color::White | Color::Gray => Some(false),
+                _ => None,
+            }
+        };
+        from_color(self.bg_base)
+            .or_else(|| from_color(self.design_canvas()))
+            .unwrap_or(true)
     }
 
     /// Pin chrome and semantic-accent colors to ANSI-named entries so
@@ -1017,8 +1041,10 @@ mod tests {
         // override scope should be revisited.
         use ratatui::style::Color;
         let q = Theme::groknight().quantized(color_support::ColorLevel::Basic);
+        // Solid design RGB backgrounds all collapse onto Black at Basic.
         for (name, color) in [
             ("bg_base", q.bg_base),
+            ("bg_terminal", q.bg_terminal),
             ("bg_light", q.bg_light),
             ("bg_dark", q.bg_dark),
             ("bg_highlight", q.bg_highlight),

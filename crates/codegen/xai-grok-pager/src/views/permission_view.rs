@@ -679,11 +679,16 @@ pub fn render_permission_view(
     }
 
     // Unfocus dim: when the prompt area is unfocused (e.g. user moved
-    // to scrollback), blend foregrounds toward `bg_light` so the panel
-    // visually recedes. Mirrors the unfocused prompt widget pattern
-    // (`prompt_widget.rs:1948`) and `render_question_view`.
+    // to scrollback), blend foregrounds toward the solid panel paint so
+    // the panel visually recedes. Mirrors the unfocused prompt widget
+    // and `render_question_view`.
     if !focused {
-        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        crate::render::color::blend_area(
+            buf,
+            area,
+            Some((theme.solid_paint(theme.bg_light), 0.66)),
+            None,
+        );
     }
 
     PermissionRenderResult {

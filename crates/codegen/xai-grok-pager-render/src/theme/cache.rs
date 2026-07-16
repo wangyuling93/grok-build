@@ -35,6 +35,23 @@ static AUTO_MODE: AtomicBool = AtomicBool::new(false);
 /// session (minimal mode — no theming).
 static TERMINAL_NATIVE_LOCK: AtomicBool = AtomicBool::new(false);
 
+/// Optional transparent body fills (`[ui].transparent_background`).
+/// Co-located with theme kind so [`Theme::current`] does not reach into
+/// the appearance cache. Primed from `UiConfig` at startup; updated on
+/// settings toggle/rollback. Default OFF.
+static TRANSPARENT_BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+/// Read the transparent-background flag (paint-time gate).
+#[must_use]
+pub fn load_transparent_background() -> bool {
+    TRANSPARENT_BACKGROUND.load(Ordering::Relaxed)
+}
+
+/// Replace the transparent-background flag (optimistic update or rollback).
+pub fn set_transparent_background(enabled: bool) {
+    TRANSPARENT_BACKGROUND.store(enabled, Ordering::Relaxed);
+}
+
 /// Decode the u8 stored in `CURRENT` back to a `ThemeKind`. Falls
 /// back to `GrokNight` if the byte is somehow out of range (which
 /// can't happen via `set` — the discriminant is always a valid
@@ -282,6 +299,7 @@ pub fn reset_for_test() {
     CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
+    TRANSPARENT_BACKGROUND.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);
     *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }

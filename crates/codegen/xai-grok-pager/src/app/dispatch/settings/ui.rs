@@ -4,6 +4,7 @@ use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
+    set_transparent_background, set_transparent_background_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
@@ -419,6 +420,14 @@ pub(in crate::app::dispatch) fn dispatch_toggle_compact_mode(app: &mut AppView) 
     set_compact_mode(app, new)
 }
 
+/// Toggle transparent terminal background (`/transparent` slash path).
+pub(in crate::app::dispatch) fn dispatch_toggle_transparent_background(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    let new = !app.current_ui.transparent_background;
+    set_transparent_background(app, new)
+}
+
 /// Toggle vim-style scrollback keybindings (`/vim-mode` slash command path).
 ///
 /// When OFF (default): bare-letter and Shift+letter scrollback bindings
@@ -686,6 +695,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
     use crate::settings::SettingValue;
     match (key, value) {
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
+        (crate::settings::defs::TRANSPARENT_BACKGROUND_KEY, SettingValue::Bool(b)) => {
+            Some(Action::SetTransparentBackground(*b))
+        }
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
@@ -876,6 +888,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     let mut companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
+        (crate::settings::defs::TRANSPARENT_BACKGROUND_KEY, SettingValue::Bool(b)) => {
+            set_transparent_background_inner(app, *b)
+        }
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),

@@ -13,13 +13,14 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 
 use crate::prompt_images::PastedImage;
 use crate::terminal::image as terminal_image;
 use crate::terminal::overlay;
+use crate::theme::Theme;
 
 mod content;
 mod geometry;
@@ -41,31 +42,31 @@ struct ImageOverlayRender {
 }
 
 /// Render an image preview overlay and return any post-flush pixel escapes.
+///
+/// Chrome fill uses paste surface colors from `theme`; backdrop dimming uses
+/// [`Theme::design_canvas`].
 pub fn render_image_overlay(
     buf: &mut Buffer,
     area: Rect,
     image: &PastedImage,
-    bg: Color,
-    text_fg: Color,
-    border_fg: Color,
+    theme: &Theme,
 ) -> Option<overlay::Escapes> {
-    render_image_overlay_inner(buf, area, image, bg, text_fg, border_fg)
-        .and_then(|render| render.escapes)
+    render_image_overlay_inner(buf, area, image, theme).and_then(|render| render.escapes)
 }
 
 fn render_image_overlay_inner(
     buf: &mut Buffer,
     area: Rect,
     image: &PastedImage,
-    bg: Color,
-    text_fg: Color,
-    border_fg: Color,
+    theme: &Theme,
 ) -> Option<ImageOverlayRender> {
     if area.width < MIN_BOX_WIDTH {
         return None;
     }
 
-    let theme = crate::theme::Theme::current();
+    let bg = theme.paste_bg;
+    let text_fg = theme.paste_fg;
+    let border_fg = theme.paste_dim;
     let protocol = terminal_image::detect_graphics_protocol();
     let plan = plan_image_preview(image, protocol);
     let min_height = if plan.show_pixels {
@@ -84,7 +85,7 @@ fn render_image_overlay_inner(
     )?;
     let overlay_rect = geometry.overlay_rect;
 
-    crate::render::color::dim_area(buf, area, theme.bg_base, 0.5);
+    crate::render::color::dim_area(buf, area, theme.design_canvas(), 0.5);
 
     ratatui::widgets::Clear.render(overlay_rect, buf);
     buf.set_style(overlay_rect, Style::default().fg(text_fg).bg(bg));

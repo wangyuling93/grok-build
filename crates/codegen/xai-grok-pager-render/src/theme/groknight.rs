@@ -72,6 +72,8 @@ impl Theme {
             bg_highlight: BG_HIGHLIGHT,
             bg_hover: rgb(44, 44, 44),
             bg_terminal: BG,
+            // Solid design endpoint — survives transparent paint clears.
+            canvas: BG_STORM,
 
             accent_user: FG_DARK,
             accent_assistant: MAGENTA,
@@ -155,12 +157,16 @@ impl Theme {
 mod tests {
     use super::*;
 
+    /// Constructor invariants for GrokNight (including polarity used by
+    /// transparent inverse-chip ink).
     #[test]
-    #[ignore = "known broken: expected accent values drift from runtime theme"]
     fn test_groknight_theme() {
         let theme = Theme::groknight();
         assert!(matches!(theme.bg_base, Color::Rgb(20, 20, 20)));
-        assert!(matches!(theme.accent_user, Color::Rgb(225, 225, 225)));
+        assert!(matches!(theme.accent_user, Color::Rgb(200, 200, 200)));
         assert!(matches!(theme.text_primary, Color::Rgb(225, 225, 225)));
+        assert!(theme.is_dark());
+        assert_eq!(theme.canvas, theme.bg_base);
+        assert_eq!(theme.design_canvas(), theme.bg_base);
     }
 }

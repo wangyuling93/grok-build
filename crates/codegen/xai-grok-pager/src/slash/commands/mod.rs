@@ -62,6 +62,7 @@ pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
+pub mod transparent;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
@@ -96,6 +97,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(auto::AutoCommand),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
+        Arc::new(transparent::TransparentCommand),
         Arc::new(vim_mode::VimModeCommand),
         Arc::new(plugin::HooksCommand),
         Arc::new(plugin::PluginsCommand),

@@ -830,6 +830,9 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
+        crate::settings::defs::TRANSPARENT_BACKGROUND_KEY => {
+            Some(Action::SetTransparentBackground(new))
+        }
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),

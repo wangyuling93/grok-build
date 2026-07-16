@@ -1812,7 +1812,7 @@ fn render_create_text_field(
         if cursor_x < content_area.x + content_area.width
             && let Some(cell) = buf.cell_mut((cursor_x, y))
         {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(Style::default().fg(theme.invert_canvas()).bg(theme.text_primary));
         }
     }
     y + 2

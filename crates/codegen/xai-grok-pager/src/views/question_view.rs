@@ -1735,10 +1735,15 @@ pub fn render_question_view(
 
     // Unfocus dim: when this overlay is rendered while the user has
     // navigated to the scrollback (or any other pane), blend foregrounds
-    // toward `bg_light` so the panel visually recedes. Mirrors the
-    // unfocused prompt widget pattern (`prompt_widget.rs:1948`).
+    // toward the solid panel paint so the panel visually recedes.
+    // Mirrors the unfocused prompt widget.
     if !focused {
-        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        crate::render::color::blend_area(
+            buf,
+            area,
+            Some((theme.solid_paint(theme.bg_light), 0.66)),
+            None,
+        );
     }
 
     let options_end_y = visible_bottom.saturating_sub(freeform_h);

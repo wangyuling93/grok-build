@@ -28,6 +28,10 @@ pub(crate) const MAX_THOUGHTS_WIDTH_MAX: i64 = 500;
 /// definition and the live-wrap-preview gate in the int stepper.
 pub(crate) const MAX_THOUGHTS_WIDTH_KEY: &str = "max_thoughts_width";
 
+/// Registry key for `[ui].transparent_background` — shared across settings
+/// def, registry read path, dispatch set/reset/rollback, persist, and e2e.
+pub const TRANSPARENT_BACKGROUND_KEY: &str = "transparent_background";
+
 // ---------------------------------------------------------------------------
 // Theme choice catalogs.
 //
@@ -566,6 +570,28 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: TRANSPARENT_BACKGROUND_KEY,
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "Transparent background",
+            description: "Let the terminal's background show through the TUI \
+                          (useful with translucent terminals such as Ghostty). \
+                          Toggle with /transparent.",
+            keywords: &[
+                "transparent",
+                "translucent",
+                "background",
+                "opacity",
+                "ghostty",
+                "see-through",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.transparent_background,
+            },
+            restart_required: false,
+            hidden_in_minimal: true,
         },
         SettingMeta {
             key: "show_timestamps",

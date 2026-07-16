@@ -323,7 +323,12 @@ fn render_reset_confirm_overlay(
             height: 1,
         };
         buf.set_style(strip, Style::default().add_modifier(Modifier::DIM));
-        crate::render::color::blend_area(buf, strip, Some((theme.bg_base, 0.55)), None);
+        crate::render::color::blend_area(
+            buf,
+            strip,
+            Some((theme.design_canvas(), 0.55)),
+            None,
+        );
     }
 }
 

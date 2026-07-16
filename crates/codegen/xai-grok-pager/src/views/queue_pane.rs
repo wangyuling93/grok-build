@@ -903,7 +903,7 @@ impl QueuePane {
             {
                 let screen_y = inner.y + rel as u16;
                 let theme = Theme::current();
-                let hover_bg = crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5)
+                let hover_bg = theme.blend_canvas(theme.bg_dark, 0.5)
                     .unwrap_or(theme.bg_dark);
                 let row = Rect::new(inner.x, screen_y, inner.width, 1);
                 buf.set_style(row, Style::default().bg(hover_bg));
@@ -1611,7 +1611,7 @@ mod tests {
         pane.render(area, &mut buf, false, &layout_cfg, None, true);
 
         let theme = Theme::current();
-        let hover_bg = crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5)
+        let hover_bg = theme.blend_canvas(theme.bg_dark, 0.5)
             .unwrap_or(theme.bg_dark);
 
         // Hovered (second) row carries the hover bg across its full width.

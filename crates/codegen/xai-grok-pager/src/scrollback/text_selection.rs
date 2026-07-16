@@ -830,20 +830,21 @@ pub fn reconstruct_table_selection_text(
     }
 }
 
-/// Uniform selection band in the classic inverted colors (`bg_base` on
+/// Uniform selection band in the classic inverted colors (`invert_canvas` on
 /// `text_primary`): styled spans (inline code, links, syntax highlighting)
 /// join the band instead of inverting to their own colors.
-/// Terminal-native / colorless themes fall back to reverse video.
+/// Terminal-native / colorless themes (Reset text) fall back to reverse video.
 pub(crate) fn apply_selection_highlight(theme: &Theme, cell: &mut ratatui::buffer::Cell) {
     let band = theme.text_primary;
-    if band == Color::Reset || theme.bg_base == Color::Reset {
+    let ink = theme.invert_canvas();
+    if band == Color::Reset || ink == Color::Reset {
         cell.modifier.insert(Modifier::REVERSED);
         return;
     }
     // A search-match highlight painted earlier in the frame sets REVERSED;
     // left in place it would swap the band right back out.
     cell.modifier.remove(Modifier::REVERSED);
-    cell.set_fg(theme.bg_base);
+    cell.set_fg(ink);
     cell.set_bg(band);
 }
 
@@ -1208,6 +1209,7 @@ pub fn url_range_at_col(text: &str, col: u16) -> Option<Range<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::{Color, Modifier};
 
     fn single_line_drag(block_line_idx: usize, width: u16) -> ActiveTextDrag {
         ActiveTextDrag {
@@ -1226,6 +1228,50 @@ mod tests {
             kind: SelectionKind::Linear,
             anchor_content_width: None,
         }
+    }
+
+    #[test]
+    fn selection_highlight_terminal_native_uses_reversed() {
+        // Terminal-native has Reset body + Reset design canvas → reverse
+        // video, not hardcoded Black ink (wrong polarity on light hosts).
+        let theme = Theme::terminal_default();
+        assert_eq!(theme.invert_canvas(), Color::Reset);
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_char('x');
+        apply_selection_highlight(&theme, &mut cell);
+        assert!(
+            cell.modifier.contains(Modifier::REVERSED),
+            "terminal-native selection must use REVERSED, got modifier={:?}",
+            cell.modifier
+        );
+    }
+
+    #[test]
+    fn selection_highlight_transparent_solid_uses_polarity_ink() {
+        let theme = Theme::groknight().transparent_elevated();
+        assert_eq!(theme.bg_base, Color::Reset);
+        assert_eq!(theme.invert_canvas(), Color::Black);
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_char('x');
+        cell.modifier.insert(Modifier::REVERSED); // search leftover
+        apply_selection_highlight(&theme, &mut cell);
+        assert!(
+            !cell.modifier.contains(Modifier::REVERSED),
+            "transparent solid selection must clear REVERSED and paint a band"
+        );
+        assert_eq!(cell.fg, Color::Black);
+        assert_eq!(cell.bg, theme.text_primary);
+    }
+
+    #[test]
+    fn selection_highlight_opaque_solid_uses_design_canvas_ink() {
+        let theme = Theme::groknight();
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_char('x');
+        apply_selection_highlight(&theme, &mut cell);
+        assert!(!cell.modifier.contains(Modifier::REVERSED));
+        assert_eq!(cell.fg, theme.bg_base);
+        assert_eq!(cell.bg, theme.text_primary);
     }
 
     #[test]

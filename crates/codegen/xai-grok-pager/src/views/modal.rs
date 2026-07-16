@@ -916,7 +916,12 @@ pub fn render_cancel_turn_panel(
         y += 1;
     }
     if !focused {
-        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        crate::render::color::blend_area(
+            buf,
+            area,
+            Some((theme.solid_paint(theme.bg_light), 0.66)),
+            None,
+        );
     }
 }
 /// Apply scroll-key dispatch for a DocViewer modal. Returns `true` if the key

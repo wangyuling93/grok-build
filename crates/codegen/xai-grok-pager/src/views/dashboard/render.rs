@@ -3673,7 +3673,7 @@ fn needs_input_bullet_color(tick: u64, theme: &Theme) -> Color {
     if bright {
         theme.warning
     } else {
-        crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
+        theme.blend_canvas(theme.warning, 0.5)
             .unwrap_or(theme.warning)
     }
 }
@@ -6784,7 +6784,7 @@ if *count == 1)),
 
         // The dim blink phase fades the bullet (only assertable when the
         // theme supports blending; non-truecolor falls back to full yellow).
-        if crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5).is_some() {
+        if theme.blend_canvas(theme.warning, 0.5).is_some() {
             let dim = render(NEEDS_INPUT_BLINK_DIVISOR);
             assert_ne!(
                 dim[(2, 0)].fg,

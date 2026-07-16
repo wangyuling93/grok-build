@@ -6,7 +6,17 @@ Grok Build draws all TUI colors from a central theme. You can switch themes whil
 
 ## Available Themes
 
-Grok includes five built-in themes, plus an `auto` option that follows your system appearance:
+Grok includes five built-in themes, plus an `auto` option that follows your system appearance.
+
+### Transparent background
+
+By default themes paint solid design backgrounds. Enable **Transparent background** so the body canvas and elevated surfaces use the host terminal's background instead — useful with translucent terminals such as Ghostty:
+
+- Slash: `/transparent` (aliases `/transparent-bg`, `/transparency`)
+- Settings → Appearance → **Transparent background**
+- Config: `~/.grok/config.toml` → `[ui] transparent_background = true`
+
+When enabled, body and passive panel fills use the host terminal background; accents and text keep full theme colors. Hover, selection, and other interaction highlights stay solid so focus remains visible. Dim/fade math still blends toward the theme's design canvas (not pure black/white), so motion and unfocus cues keep the same character as the solid theme.
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|

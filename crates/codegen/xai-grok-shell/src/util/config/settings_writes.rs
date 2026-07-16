@@ -11,6 +11,11 @@ pub async fn set_compact_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.compact_mode = value).await
 }
 
+/// Persist `[ui].transparent_background` via `update_config`.
+pub async fn set_transparent_background(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.transparent_background = value).await
+}
+
 /// Persist `[ui].show_timestamps` via `update_config`. `UiConfig::show_timestamps`
 /// is `Option<bool>` — pager-side `None` means "use default" — so we wrap.
 pub async fn set_show_timestamps(value: bool) -> Result<()> {

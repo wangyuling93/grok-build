@@ -4523,7 +4523,7 @@
         // blend as `render_info_line`'s model name), no bold, no inverse.
         let theme = Theme::current();
         let expected_fg =
-            crate::render::color::blend_color(theme.bg_base, theme.text_secondary, 0.6)
+            theme.blend_canvas(theme.text_secondary, 0.6)
                 .unwrap_or(theme.gray);
         let title_cell = buf.cell((26, 0)).unwrap().style();
         assert_eq!(title_cell.fg, Some(expected_fg));

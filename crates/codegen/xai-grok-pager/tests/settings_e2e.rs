@@ -13,7 +13,7 @@ use std::sync::Arc;
 use xai_grok_pager::app::actions::Action;
 use xai_grok_pager::settings::{
     EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKind, SettingMeta, SettingOwner,
-    SettingValue, SettingsRegistry,
+    SettingValue, SettingsRegistry, TRANSPARENT_BACKGROUND_KEY,
 };
 use xai_grok_pager::views::settings_modal::{
     RowEntry, SettingsKeyOutcome, SettingsModalMode, SettingsModalState, handle_settings_key,
@@ -30,6 +30,7 @@ use xai_grok_shell::agent::config::UiConfig;
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
     "screen_mode",
+    TRANSPARENT_BACKGROUND_KEY,
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
@@ -206,6 +207,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
     match (key, action) {
         ("compact_mode", Action::SetCompactMode(b)) => {
             assert_eq!(b, expected, "SetCompactMode value differs from expected")
+        }
+        (TRANSPARENT_BACKGROUND_KEY, Action::SetTransparentBackground(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetTransparentBackground value differs from expected"
+            )
         }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
@@ -1906,6 +1913,7 @@ fn defaults_round_trip_through_registry() {
         match key {
             "compact_mode" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
+            TRANSPARENT_BACKGROUND_KEY => SettingValue::Bool(false),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),

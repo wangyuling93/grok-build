@@ -5,28 +5,34 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use crate::prompt_images::VideoViewerState;
 use crate::render::safe_buf::SafeBuf;
+use crate::theme::Theme;
 
 /// Render the video viewer popup chrome. Returns the popup `Rect`,
 /// or `None` if the area is too small.
+///
+/// Chrome fill uses `theme.bg_base` (see-through under transparent mode);
+/// backdrop dimming uses [`Theme::design_canvas`].
 pub fn render_video_overlay(
     buf: &mut Buffer,
     area: Rect,
     viewer: &VideoViewerState,
-    bg: Color,
-    text_fg: Color,
-    border_fg: Color,
+    theme: &Theme,
 ) -> Option<Rect> {
     if area.height < 8 || area.width < 20 {
         return None;
     }
 
-    crate::render::color::dim_area(buf, area, bg, 0.5);
+    let bg = theme.bg_base;
+    let text_fg = theme.text_primary;
+    let border_fg = theme.gray_dim;
+
+    crate::render::color::dim_area(buf, area, theme.design_canvas(), 0.5);
 
     // 90% centered popup.
     let popup_width = ((area.width as u32 * 90) / 100)
@@ -79,9 +85,9 @@ fn render_progress_bar(
     buf: &mut Buffer,
     popup_rect: Rect,
     viewer: &VideoViewerState,
-    text_fg: Color,
-    bar_dim: Color,
-    bg: Color,
+    text_fg: ratatui::style::Color,
+    bar_dim: ratatui::style::Color,
+    bg: ratatui::style::Color,
 ) {
     let bar_y = popup_rect.y + popup_rect.height.saturating_sub(1);
     let inner_width = popup_rect.width.saturating_sub(2) as usize;

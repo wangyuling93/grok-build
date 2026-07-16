@@ -308,7 +308,7 @@ pub(super) fn render_hero_box(
     upgrade_cta: Option<&str>,
 ) -> HeroBoxRects {
     // Dim the box border toward the background for a softer, dimmer gray.
-    let border_color = crate::render::color::blend_color(theme.bg_base, theme.gray_dim, 0.45)
+    let border_color = theme.blend_canvas(theme.gray_dim, 0.45)
         .unwrap_or(theme.gray_dim);
     let border_block = Block::new()
         .borders(Borders::ALL)

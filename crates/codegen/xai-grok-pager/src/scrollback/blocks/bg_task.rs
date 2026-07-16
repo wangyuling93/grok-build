@@ -9,7 +9,6 @@ use std::time::Duration;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
 
-use crate::render::color::blend_color;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
 use crate::theme::Theme;
@@ -211,7 +210,7 @@ impl BlockContent for BgTaskBlock {
                     // Pre-dim using the same ratio as collapsed execute bullets
                     // so the peak brightness matches other collapsed blocks.
                     let dim = ctx.appearance.scrollback.display.dim_accent;
-                    let dimmed = blend_color(theme.bg_base, theme.accent_running, dim)
+                    let dimmed = theme.blend_canvas(theme.accent_running, dim)
                         .unwrap_or(theme.accent_running);
                     Some(AccentStyle::animated(dimmed))
                 } else {

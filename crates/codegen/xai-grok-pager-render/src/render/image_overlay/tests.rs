@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
 use super::content::{format_bytes, format_mime};
 use super::geometry::{overlay_geometry, plan_image_preview};
 use super::*;
 use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+use crate::theme::Theme;
 
 fn png_header() -> Vec<u8> {
     vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
@@ -37,14 +37,8 @@ fn sample_image(path: Option<&str>, pixels: bool) -> PastedImage {
 
 fn render_to_string(image: &PastedImage, area: Rect) -> (Option<ImageOverlayRender>, String) {
     let mut buf = Buffer::empty(area);
-    let render = render_image_overlay_inner(
-        &mut buf,
-        area,
-        image,
-        Color::Black,
-        Color::White,
-        Color::Gray,
-    );
+    let theme = Theme::groknight();
+    let render = render_image_overlay_inner(&mut buf, area, image, &theme);
     let rendered = (area.y..area.y + area.height)
         .map(|y| {
             (area.x..area.x + area.width)

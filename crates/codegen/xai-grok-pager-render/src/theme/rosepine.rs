@@ -37,6 +37,8 @@ impl Theme {
             bg_highlight: OVERLAY,
             bg_hover: HIGHLIGHT_MED,
             bg_terminal: BASE,
+            // Solid design endpoint — survives transparent paint clears.
+            canvas: BASE,
 
             accent_user: TEXT,
             accent_assistant: IRIS,

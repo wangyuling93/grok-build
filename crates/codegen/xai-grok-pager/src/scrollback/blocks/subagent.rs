@@ -18,7 +18,6 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::subagent::format_subagent_meta;
-use crate::render::color::blend_color;
 use crate::render::line_utils::truncate_str;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
@@ -275,7 +274,7 @@ impl BlockContent for SubagentBlock {
             SubagentBlockKind::Started => {
                 if ctx.is_running {
                     let dim = ctx.appearance.scrollback.display.dim_accent;
-                    let dimmed = blend_color(theme.bg_base, theme.accent_running, dim)
+                    let dimmed = theme.blend_canvas(theme.accent_running, dim)
                         .unwrap_or(theme.accent_running);
                     Some(AccentStyle::animated(dimmed))
                 } else {

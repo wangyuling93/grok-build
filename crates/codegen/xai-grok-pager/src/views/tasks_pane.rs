@@ -108,7 +108,9 @@ fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
             let fg = span
                 .style
                 .fg
-                .and_then(|fg| crate::render::color::blend_color(theme.bg_base, fg, blend_factor))
+                .and_then(|fg| {
+                    theme.blend_canvas(fg, blend_factor)
+                })
                 .or(span.style.fg);
             let style = Style::default().fg(fg.unwrap_or(theme.gray));
             Span::styled(span.content.clone(), style)
@@ -372,7 +374,7 @@ impl TaskEntry {
         let type_color = if info.is_running() || info.pending_kill {
             raw_type_color
         } else {
-            crate::render::color::blend_color(theme.bg_base, raw_type_color, 0.45)
+            theme.blend_canvas(raw_type_color, 0.45)
                 .unwrap_or(raw_type_color)
         };
         let type_style = Style::default().fg(type_color);

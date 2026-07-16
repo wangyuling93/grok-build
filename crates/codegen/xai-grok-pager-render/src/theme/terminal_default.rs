@@ -45,6 +45,8 @@ impl Theme {
             bg_highlight: Color::Reset,
             bg_hover: Color::Reset,
             bg_terminal: Color::Reset,
+            // No solid design endpoint — design_canvas() → Reset; blends fail soft.
+            canvas: Color::Reset,
 
             accent_user: Color::Reset,
             accent_assistant: Color::Magenta,

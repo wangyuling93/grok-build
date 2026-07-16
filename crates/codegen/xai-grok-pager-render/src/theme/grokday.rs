@@ -60,6 +60,8 @@ impl Theme {
             bg_highlight: BG_HIGHLIGHT,
             bg_hover: rgb(208, 208, 208),
             bg_terminal: BG,
+            // Solid design endpoint — survives transparent paint clears.
+            canvas: BG_STORM,
 
             accent_user: FG_DARK,
             accent_assistant: MAGENTA,

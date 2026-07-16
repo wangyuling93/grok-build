@@ -3090,7 +3090,8 @@ impl PromptWidget {
             && ta_area.width > 0
             && ta_area.height > 0
         {
-            let interim_fg = crate::render::color::blend_color(bg, theme.text_secondary, 0.7)
+            let interim_fg = theme
+                .blend(bg, theme.text_secondary, 0.7)
                 .unwrap_or(theme.gray);
             let interim_style = Style::default().fg(interim_fg).bg(bg);
             if self.textarea.text().is_empty() {
@@ -3184,8 +3185,9 @@ impl PromptWidget {
             }
         }
 
-        // Unfocused dimming: blend fg toward bg (bg already precomputed above).
-        // Skip when bg_override is set — the prompt is inline in another widget.
+        // Unfocused dimming: blend fg toward the solid panel paint endpoint
+        // (`solid_paint` resolves Reset under transparent mode to the design
+        // canvas). Skip when bg_override is set — prompt is inline elsewhere.
         if !style.focused && style.bg_override.is_none() {
             // Dim only the content inside the box (skip all border chars).
             let dim_area = Rect {
@@ -3194,7 +3196,12 @@ impl PromptWidget {
                 width: area.width.saturating_sub(2),
                 height: content_area.height.saturating_sub(vpad_top + info_block),
             };
-            crate::render::color::blend_area(buf, dim_area, Some((bg, 0.66)), None);
+            crate::render::color::blend_area(
+                buf,
+                dim_area,
+                Some((theme.solid_paint(bg), 0.66)),
+                None,
+            );
         }
 
         // Hide the cursor while voice capture is active — the streamed
@@ -3265,14 +3272,8 @@ impl PromptWidget {
                     post_flush_escapes: None,
                 };
             };
-            post_flush_escapes = crate::render::render_image_overlay(
-                buf,
-                overlay,
-                image,
-                theme.paste_bg,
-                theme.paste_fg,
-                theme.paste_dim,
-            );
+            post_flush_escapes =
+                crate::render::render_image_overlay(buf, overlay, image, &theme);
         }
 
         // Clear ID 1 whenever this frame did not replace it.
@@ -3292,7 +3293,8 @@ impl PromptWidget {
     /// unfocused, so both borders read as one chrome.
     fn chrome_caption_style(bg: ratatui::style::Color, theme: &Theme, focused: bool) -> Style {
         let opacity = if focused { 0.6 } else { 0.4 };
-        let fg = crate::render::color::blend_color(bg, theme.text_secondary, opacity)
+        let fg = theme
+            .blend(bg, theme.text_secondary, opacity)
             .unwrap_or(theme.gray);
         Style::default().fg(fg).bg(bg)
     }
@@ -3326,7 +3328,8 @@ impl PromptWidget {
         let sep_fg = if focused {
             theme.gray_dim
         } else {
-            crate::render::color::blend_color(bg, theme.gray_dim, sep_opacity)
+            theme
+                .blend(bg, theme.gray_dim, sep_opacity)
                 .unwrap_or(theme.gray_dim)
         };
         let sep_style = Style::default().fg(sep_fg).bg(bg);
@@ -3356,7 +3359,8 @@ impl PromptWidget {
                     // Bold flags use full color for visibility.
                     Style::default().fg(color).bg(bg)
                 } else {
-                    let dimmed = crate::render::color::blend_color(bg, color, flag_opacity)
+                    let dimmed = theme
+                        .blend(bg, color, flag_opacity)
                         .unwrap_or(theme.gray);
                     Style::default().fg(dimmed).bg(bg)
                 }
@@ -3365,7 +3369,8 @@ impl PromptWidget {
             } else if focused {
                 flag_style
             } else {
-                let dimmed = crate::render::color::blend_color(bg, theme.gray, flag_opacity)
+                let dimmed = theme
+                    .blend(bg, theme.gray, flag_opacity)
                     .unwrap_or(theme.gray);
                 Style::default().fg(dimmed).bg(bg)
             };

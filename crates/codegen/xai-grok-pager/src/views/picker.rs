@@ -532,7 +532,10 @@ fn render_search_bar_with_label_viewport(
                 // character underneath remains visible (matching the
                 // rename overlay's cursor style).
                 if let Some(cell) = buf.cell_mut((cursor_x, y)) {
-                    let cursor_fg = if let Some(c) = bg { c } else { theme.bg_base };
+                    // Solid elevated paint keeps solid ink; transparent body
+                    // (`Reset`) resolves via invert_ink polarity ink.
+                    let paint = bg.unwrap_or(theme.bg_base);
+                    let cursor_fg = theme.invert_ink(paint);
                     cell.set_style(Style::default().fg(cursor_fg).bg(theme.text_primary));
                 }
             }
@@ -743,7 +746,7 @@ pub fn render_popup_frame(
     }
 
     // Safe to render: dim background, clear, and draw bordered popup.
-    crate::views::file_search::line_viewer::dim_area(buf, area, theme.bg_base, 0.5);
+    crate::views::file_search::line_viewer::dim_area(buf, area, theme.design_canvas(), 0.5);
     Clear.render(popup_area, buf);
     buf.set_style(popup_area, base_style);
     border.render(popup_area, buf);
@@ -1320,7 +1323,7 @@ pub fn render_floating_frame(
     }
 
     // Dim background.
-    crate::views::file_search::line_viewer::dim_area(buf, area, theme.bg_base, 0.5);
+    crate::views::file_search::line_viewer::dim_area(buf, area, theme.design_canvas(), 0.5);
 
     // Compute popup area (65% width, fixed height for 20 entries).
     let popup_w = ((area.width as f32 * 0.65) as u16).max(44).min(area.width);

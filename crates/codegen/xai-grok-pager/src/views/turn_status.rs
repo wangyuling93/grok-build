@@ -58,7 +58,7 @@ pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
 /// `theme.accent_plan` for plan-approval waits.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
     let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
-    crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
+    theme.blend_canvas(accent, 0.3 + brightness * 0.7)
         .unwrap_or(accent)
 }
 

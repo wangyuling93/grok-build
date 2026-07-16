@@ -1216,6 +1216,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compact_mode" => {
             let _ = dispatch(Action::SetCompactMode(true), app);
         }
+        crate::settings::defs::TRANSPARENT_BACKGROUND_KEY => {
+            let _ = dispatch(Action::SetTransparentBackground(true), app);
+        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }

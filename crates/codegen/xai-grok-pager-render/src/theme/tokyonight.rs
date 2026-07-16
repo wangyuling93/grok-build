@@ -56,6 +56,16 @@ pub struct Theme {
     pub bg_hover: Color, // Mouse hover row in dropdowns — between bg_highlight and bg_visual
     pub bg_terminal: Color, // For terminal output blocks (currently unused, using bg_dark instead)
 
+    /// Solid design endpoint for blend / fade / dim / invert math.
+    ///
+    /// Equals paint `bg_base` on opaque constructors. Survives
+    /// [`Theme::transparent_elevated`] when paint slots clear to
+    /// [`Color::Reset`]. Terminal-native sets this to [`Color::Reset`]
+    /// (blends fail soft).
+    ///
+    /// Crate-private: external callers use [`Theme::design_canvas`].
+    pub(crate) canvas: Color,
+
     // Accent colors (for vertical lines)
     pub accent_user: Color,
     pub accent_assistant: Color,
@@ -163,6 +173,8 @@ impl Theme {
             bg_highlight: BG_HIGHLIGHT,
             bg_hover: rgb(40, 49, 76),
             bg_terminal: BG,
+            // Solid design endpoint — survives transparent paint clears.
+            canvas: BG_STORM,
 
             accent_user: BLUE,
             accent_assistant: MAGENTA,
@@ -346,5 +358,6 @@ mod tests {
         let theme = Theme::tokyonight();
         assert!(matches!(theme.bg_base, Color::Rgb(36, 40, 59)));
         assert!(matches!(theme.accent_user, Color::Rgb(122, 162, 247)));
+        assert!(theme.is_dark());
     }
 }

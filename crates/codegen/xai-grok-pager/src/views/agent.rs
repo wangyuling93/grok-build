@@ -744,7 +744,8 @@ pub fn render_scrollbar(
         let scrollbar_bg = scrollbar_cfg.scrollbar_bg.unwrap_or(theme.scrollbar_bg);
         let scrollbar_fg = scrollbar_cfg.scrollbar_fg.unwrap_or(theme.scrollbar_fg);
         let thumb_fg = if is_following {
-            crate::render::color::blend_color(scrollbar_bg, scrollbar_fg, 0.4)
+            theme
+                .blend(scrollbar_bg, scrollbar_fg, 0.4)
                 .unwrap_or(scrollbar_fg)
         } else {
             scrollbar_fg

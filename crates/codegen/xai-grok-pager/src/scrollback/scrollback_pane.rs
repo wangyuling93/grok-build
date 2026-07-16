@@ -7,7 +7,7 @@ use ratatui::widgets::StatefulWidget;
 use std::ops::Range;
 
 use crate::render::SafeBuf;
-use crate::render::color::{blend_color, fade_region};
+use crate::render::color::fade_region;
 use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::entry::ScrollbackEntry;
 use crate::scrollback::layout::HorizontalLayout;
@@ -254,7 +254,8 @@ impl ScrollbackPane {
         };
 
         let display_cfg = &state.appearance().scrollback.display;
-        let hover_bg = blend_color(theme.bg_base, theme.bg_dark, 0.5).unwrap_or(theme.bg_dark);
+        let hover_bg =
+            theme.blend_canvas(theme.bg_dark, 0.5).unwrap_or(theme.bg_dark);
         let bg_style = Style::default().bg(hover_bg);
 
         // Inset the hover bg by 1 column on each side unless the appearance
@@ -428,7 +429,7 @@ impl ScrollbackPane {
                 // So even a fully visible pushed header (clip_top=0) starts at 80% for 4-row header.
                 let opacity =
                     visible_height as f32 / (pushed.render_height.saturating_add(1)) as f32;
-                fade_region(buf, header_area, theme.bg_base, opacity);
+                fade_region(buf, header_area, theme.design_canvas(), opacity);
 
                 // Compute selection box for pushed header if it's selected
                 if self.is_active && state.selected() == Some(pushed.entry_idx) {
@@ -437,8 +438,9 @@ impl ScrollbackPane {
 
                     // Selection border fades with content.
                     // If needed, use opacity.max(0.5) to enforce a minimum visibility floor.
-                    let border_color = blend_color(theme.bg_base, theme.selection_border, opacity)
-                        .unwrap_or(theme.selection_border);
+                    let border_color =
+                        theme.blend_canvas(theme.selection_border, opacity)
+                            .unwrap_or(theme.selection_border);
 
                     // Top is clipped only when content is actually being clipped off (clip_top > 0)
                     // When clip_top == 0, the full header is visible (just fading), so show full border

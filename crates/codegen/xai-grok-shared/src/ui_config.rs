@@ -19,6 +19,11 @@ pub struct UiConfig {
     /// Compact mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default)]
     pub compact_mode: bool,
+    /// When true, body canvas and elevated surfaces use the host terminal
+    /// background (`Color::Reset`) so translucent terminals (e.g. Ghostty)
+    /// show through. When false, themes paint their solid design backgrounds.
+    #[serde(default)]
+    pub transparent_background: bool,
     /// Simple mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_mode: Option<bool>,
@@ -242,6 +247,7 @@ impl Default for UiConfig {
             yolo: false,
             ui_theme: None,
             compact_mode: false,
+            transparent_background: false,
             simple_mode: None,
             permission_mode: None,
             approval_mode: None,

@@ -513,6 +513,10 @@ pub enum Action {
     ToggleCompactMode,
     /// Set compact mode (reduce user message padding).
     SetCompactMode(bool),
+    /// Toggle transparent terminal background (host GUI bg shows through).
+    ToggleTransparentBackground,
+    /// Set transparent terminal background.
+    SetTransparentBackground(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).

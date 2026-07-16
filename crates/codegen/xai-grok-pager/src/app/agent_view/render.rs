@@ -767,7 +767,7 @@ impl AgentView {
                 None
             },
             border_color_override: if effective_plan || casual_commenting {
-                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
+                theme.blend_canvas(theme.accent_plan, 0.4)
             } else {
                 None
             },
@@ -2024,7 +2024,7 @@ impl AgentView {
                     remaining as f32 / MODE_BANNER_FADE_TICKS as f32
                 };
                 let base_fg = theme.text_secondary;
-                let fg = crate::render::color::blend_color(theme.bg_base, base_fg, opacity)
+                let fg = theme.blend_canvas(base_fg, opacity)
                     .unwrap_or(base_fg);
                 let text = format!("  {}", msg);
                 let maxw = layout.banner.width.saturating_sub(2) as usize;
@@ -2090,7 +2090,7 @@ impl AgentView {
             let content_x = rec_area.x + layout_cfg.block_pad_left;
             let (filled, brightness) = record_dot_pulse();
             let dot = crate::glyphs::record_dot(filled);
-            let dot_color = crate::render::color::blend_color(bg, theme.accent_error, brightness)
+            let dot_color = theme.blend_canvas(theme.accent_error, brightness)
                 .unwrap_or(theme.accent_error);
             buf.set_string(
                 content_x,
@@ -3389,7 +3389,7 @@ impl AgentView {
             let popup_rect = Rect::new(popup_x, popup_y, popup_width, popup_height);
             let mut image_escape_emitted = false;
             if popup_rect.width >= 10 && popup_rect.height >= 5 {
-                dim_area(buf, overlay_area, theme.bg_base, 0.5);
+                dim_area(buf, overlay_area, theme.design_canvas(), 0.5);
                 ratatui::widgets::Clear.render(popup_rect, buf);
                 buf.set_style(
                     popup_rect,
@@ -3546,9 +3546,7 @@ impl AgentView {
                 buf,
                 overlay_area,
                 viewer,
-                theme.bg_base,
-                theme.text_primary,
-                theme.gray_dim,
+                &theme,
             ) {
                 if let Some(esc) = crate::terminal::overlay::volatile_centered(
                     viewer.current_frame_data(),
@@ -3586,14 +3584,9 @@ impl AgentView {
             };
             let mut gboom_escape_emitted = false;
             let hud = gboom.hud();
-            if let Some(popup_rect) = crate::render::gboom_overlay::render_gboom_overlay(
-                buf,
-                overlay_area,
-                &hud,
-                theme.bg_base,
-                theme.text_primary,
-                theme.gray_dim,
-            ) {
+            if let Some(popup_rect) =
+                crate::render::gboom_overlay::render_gboom_overlay(buf, overlay_area, &hud, &theme)
+            {
                 gboom.set_mouse_region(
                     popup_rect.x,
                     popup_rect.y,
@@ -3682,7 +3675,12 @@ impl AgentView {
                 self.pane_areas = layout.pane_areas();
                 return (prompt_cursor_pos, prompt_post_flush);
             }
-            crate::views::file_search::line_viewer::dim_area(buf, overlay_area, theme.bg_base, 0.5);
+            crate::views::file_search::line_viewer::dim_area(
+                buf,
+                overlay_area,
+                theme.design_canvas(),
+                0.5,
+            );
             Clear.render(popup_area, buf);
             buf.set_style(popup_area, base_style);
             border.render(popup_area, buf);
