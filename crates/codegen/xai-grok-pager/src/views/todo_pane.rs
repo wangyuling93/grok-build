@@ -144,8 +144,6 @@ use ratatui::layout::Rect;
 use ratatui::widgets::StatefulWidget;
 
 use crate::appearance::LayoutConfig;
-use crate::theme::cache::RenderKey;
-
 use super::list_pane::{ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, WrapMode};
 use super::overlay::OverlayState;
 
@@ -224,8 +222,6 @@ pub struct TodoPane {
     prev_counts: TodoCounts,
     /// When the badge flash animation expires (500ms after a count change).
     badge_flash_until: Option<Instant>,
-    /// Last theme kind seen — used to detect theme switches and restyle.
-    last_render_key: RenderKey,
 }
 
 impl Default for TodoPane {
@@ -260,7 +256,6 @@ impl TodoPane {
             overlay: OverlayState::hidden(),
             prev_counts: TodoCounts::default(),
             badge_flash_until: None,
-            last_render_key: crate::theme::Theme::render_key(),
         }
     }
 
@@ -490,13 +485,10 @@ impl TodoPane {
         focused: bool,
         layout_cfg: &LayoutConfig,
     ) {
-        // Detect theme switch and refresh styles before rebuilding entries.
-        let render_key = crate::theme::Theme::render_key();
-        if render_key != self.last_render_key {
-            self.last_render_key = render_key;
-            self.style = TodoPaneStyle::default();
-            self.list_style = ListPaneStyle::default();
-        }
+        // Rebuild theme-derived styles each frame so theme/transparency
+        // changes apply without a per-pane render-key cache.
+        self.style = TodoPaneStyle::default();
+        self.list_style = ListPaneStyle::default();
 
         self.rebuild_entries();
         let inner = Self::content_area(area, layout_cfg);

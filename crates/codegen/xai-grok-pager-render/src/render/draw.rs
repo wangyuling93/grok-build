@@ -61,15 +61,17 @@ pub type PagerTerminal = xai_ratatui_inline::Terminal<CrosstermBackend<TermWrite
 ///
 /// Palette-level `Color::Reset` handles normal themed surfaces. This pass is
 /// the backstop for user-configured overrides, embedded ANSI backgrounds, and
-/// any future widget that paints a literal color. Reverse-video is converted
-/// to underline because SGR reverse would otherwise turn the foreground into
-/// an effective opaque background after the cell reaches the terminal.
+/// any future widget that paints a literal color.
+///
+/// Residual reverse-video is rewritten to bold italic (not underline): SGR
+/// reverse would otherwise paint the foreground as an opaque band, and
+/// underline is already reserved for selection/hover cues.
 fn make_buffer_transparent(buf: &mut Buffer) {
     for cell in &mut buf.content {
         let old_bg = cell.bg;
         if cell.modifier.contains(Modifier::REVERSED) {
             cell.modifier.remove(Modifier::REVERSED);
-            cell.modifier.insert(Modifier::UNDERLINED);
+            cell.modifier.insert(Modifier::BOLD | Modifier::ITALIC);
             if old_bg != Color::Reset {
                 // Preserve the visible ink of an inverse cell after removing
                 // the opaque band.
@@ -540,7 +542,7 @@ mod tests {
         assert_eq!(buf[(0, 0)].fg, Color::White);
         assert_eq!(buf[(1, 0)].fg, theme.invert_canvas());
         assert_eq!(buf[(2, 0)].fg, Color::Blue);
-        assert!(buf[(2, 0)].modifier.contains(Modifier::UNDERLINED));
+        assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD | Modifier::ITALIC));
     }
 
     #[test]
@@ -603,8 +605,9 @@ mod tests {
             String::from_utf8_lossy(&opaque),
         );
         assert!(
-            !contains(&transparent, b"\x1b[7m") && contains(&transparent, b"\x1b[4m"),
-            "transparent frame must replace reverse with underline: {:?}",
+            !contains(&transparent, b"\x1b[7m")
+                && (contains(&transparent, b"\x1b[1m") || contains(&transparent, b"\x1b[3m")),
+            "transparent frame must replace reverse with bold/italic (not underline): {:?}",
             String::from_utf8_lossy(&transparent),
         );
 

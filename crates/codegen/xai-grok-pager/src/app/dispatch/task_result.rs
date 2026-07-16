@@ -1058,20 +1058,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             rollback_value,
             error,
         } => {
+            // Transparency uses `PersistTransparentBackground` /
+            // `TransparentBackgroundPersistFailed`, not this arm.
             let rollback_effects = apply_setting_rollback(app, key, &rollback_value);
-            if key == crate::settings::defs::TRANSPARENT_BACKGROUND_KEY
-                && app.pending_transparency_rollback.is_some()
-            {
-                tracing::warn!(
-                    target : "settings", ? key, ? rollback_value, % error,
-                    "setting persist failed; rollback deferred until tasks are idle"
-                );
-            } else {
-                tracing::warn!(
-                    target : "settings", ? key, ? rollback_value, % error,
-                    "setting persist failed; rolled back"
-                );
-            }
+            tracing::warn!(
+                target : "settings", ? key, ? rollback_value, % error,
+                "setting persist failed; rolled back"
+            );
             let scrubbed = scrub_error_for_toast(&error);
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects

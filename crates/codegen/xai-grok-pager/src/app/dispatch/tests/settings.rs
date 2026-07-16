@@ -225,8 +225,8 @@ fn transparency_guard_covers_background_and_nested_subagent_work() {
         .unwrap()
         .finished = true;
 
-    // Scheduled loops remain active between firings and can wake the agent,
-    // so they also keep the paint mode fixed while the session is idle.
+    // Idle scheduled loops must not block paint-mode changes — only actively
+    // running work does.
     {
         let nested = app
             .agents
@@ -248,22 +248,10 @@ fn transparency_guard_covers_background_and_nested_subagent_work() {
         );
     }
     let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
-    assert!(effects.is_empty());
-
-    app.agents
-        .get_mut(&AgentId(0))
-        .unwrap()
-        .subagent_views
-        .get_mut("nested-child")
-        .unwrap()
-        .session
-        .scheduled_tasks
-        .clear();
-    let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
     assert_eq!(
         effects.len(),
         1,
-        "idle nested work should release the guard"
+        "idle scheduled loops must not block transparency"
     );
     assert_eq!(app.current_ui.transparent_background, Some(true));
 

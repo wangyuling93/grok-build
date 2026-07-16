@@ -675,14 +675,6 @@ pub fn render_import_claude_modal(
         let y = content_area.y + row_idx as u16;
         let is_focused = i == state.focus;
         let is_blank = matches!(row, Row::Blank);
-        if is_focused && !is_blank {
-            let hover_bg = Style::default().bg(theme.bg_highlight);
-            for x in content_area.x..content_area.x + content_area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(hover_bg);
-                }
-            }
-        }
         let line = render_row_dispatch(
             row,
             is_focused,
@@ -699,6 +691,7 @@ pub fn render_import_claude_modal(
             height: 1,
         };
         Paragraph::new(line).render(row_rect, buf);
+        // Single selection paint path — Theme owns transparent-safe cues.
         if is_focused && !is_blank {
             buf.set_style(
                 row_rect,
@@ -1003,18 +996,12 @@ fn render_item_line<'a>(
     ])
 }
 
-/// Conditionally apply the row-hover background to a span style.
+/// Pass-through for focused-row span styles.
 ///
-/// When a row is focused the renderer pre-fills the row's cells with
-/// `bg_highlight`. We also set bg explicitly on each span so the highlight
-/// survives even if a span resets its background, and so that hovering
-/// reads as a continuous bar across the full row width.
-fn with_bg(style: Style, focused: bool, theme: &Theme) -> Style {
-    if focused {
-        style.bg(theme.bg_highlight)
-    } else {
-        style
-    }
+/// Selection is applied as a full-row post-pass via
+/// [`Theme::selection_overlay_style`]; spans keep their content ink only.
+fn with_bg(style: Style, _focused: bool, _theme: &Theme) -> Style {
+    style
 }
 
 fn format_item_label(item: &ImportableItem) -> String {

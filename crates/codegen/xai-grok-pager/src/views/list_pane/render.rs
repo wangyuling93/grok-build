@@ -16,7 +16,9 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
+#[cfg(test)]
+use ratatui::style::{Color, Modifier};
 use ratatui::widgets::StatefulWidget;
 
 use super::layout::WrapMode;
@@ -252,6 +254,8 @@ impl<T: ListItem> ListPane<'_, T> {
         let multi_range = state.multi_range();
         let first_vi = visible.start;
         let wrap_mode = state.wrap_mode();
+        // One theme snapshot per frame for selection overlay (paint mode included).
+        let theme = crate::theme::Theme::current();
 
         let mut cursor_y = area.y;
         let viewport_bottom = area.y + area.height;
@@ -380,17 +384,8 @@ impl<T: ListItem> ListPane<'_, T> {
                     width: area.width,
                     height: rows_to_render,
                 };
-                let selection_style = if bg == Color::Reset {
-                    let cue = if is_cursor {
-                        Modifier::BOLD | Modifier::UNDERLINED
-                    } else {
-                        Modifier::UNDERLINED
-                    };
-                    Style::default().add_modifier(cue)
-                } else {
-                    Style::default().bg(bg)
-                };
-                buf.set_style(sel_area, selection_style);
+                // Theme owns the transparent-safe selection contract.
+                buf.set_style(sel_area, theme.selection_overlay_style(bg, is_cursor));
             }
 
             // --- Post-pass 2: Match highlight overlay ---

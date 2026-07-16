@@ -23,14 +23,7 @@ pub fn render_menu(
     let label_style = Style::default()
         .fg(theme.text_primary)
         .add_modifier(Modifier::BOLD);
-    let label_selected_style = Style::default()
-        .fg(theme.text_primary)
-        .bg(theme.bg_highlight)
-        .add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(theme.gray_bright);
-    let key_selected_style = Style::default()
-        .fg(theme.gray_bright)
-        .bg(theme.bg_highlight);
 
     // Width: label + gap + key. Keep a 4-col gap between label and key for
     // readability.
@@ -71,34 +64,19 @@ pub fn render_menu(
         };
         rects.push(row_rect);
 
-        // Fill row background when selected/hovered
-        if is_selected {
-            let hover_bg = Style::default().bg(theme.bg_highlight);
-            for x in menu_centered.x..menu_centered.x + menu_centered.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(hover_bg);
-                }
-            }
-        }
-
         // Label, flush with the left edge of the menu column.
-        let lstyle = if is_selected {
-            label_selected_style
-        } else {
-            label_style
-        };
-        buf.set_span(menu_centered.x, y, &Span::styled(*label, lstyle), label_len);
+        buf.set_span(
+            menu_centered.x,
+            y,
+            &Span::styled(*label, label_style),
+            label_len,
+        );
 
         // Key shortcut flush with the right edge of the menu column.
-        let kstyle = if is_selected {
-            key_selected_style
-        } else {
-            key_style
-        };
         buf.set_span(
             menu_centered.x + menu_centered.width - key_width,
             y,
-            &Span::styled(*key, kstyle),
+            &Span::styled(*key, key_style),
             key_width,
         );
 
@@ -114,16 +92,9 @@ pub fn render_menu(
             } else {
                 theme.gray_bright
             };
-            let dismiss_style = if is_selected {
-                Style::default()
-                    .fg(dismiss_color)
-                    .bg(theme.bg_highlight)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(dismiss_color)
-                    .add_modifier(Modifier::BOLD)
-            };
+            let dismiss_style = Style::default()
+                .fg(dismiss_color)
+                .add_modifier(Modifier::BOLD);
             for (offset, ch) in "[x]".chars().enumerate() {
                 let col = dismiss_start + offset as u16;
                 if let Some(cell) = buf.cell_mut((col, y)) {
@@ -133,6 +104,7 @@ pub fn render_menu(
             }
         }
 
+        // Single selection paint path — Theme owns transparent-safe cues.
         if is_selected {
             buf.set_style(
                 row_rect,

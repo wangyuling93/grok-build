@@ -455,7 +455,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_compact_mode(app: &mut AppView) 
 pub(in crate::app::dispatch) fn dispatch_toggle_transparent_background(
     app: &mut AppView,
 ) -> Vec<Effect> {
-    let new = !app.current_ui.transparent_background.unwrap_or(false);
+    let new = !app.current_ui.transparent_background_enabled();
     set_transparent_background(app, new)
 }
 

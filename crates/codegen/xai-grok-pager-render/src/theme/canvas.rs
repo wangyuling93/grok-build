@@ -4,6 +4,20 @@
 //! `[ui].transparent_background`. Blend and inverse-chip math still need
 //! a solid design endpoint — that is [`Theme::canvas`] / [`Theme::design_canvas`].
 //!
+//! ## Transparent paint contract
+//!
+//! 1. **Palette** — [`Theme::transparent_elevated`] / [`Theme::apply_paint_mode`]
+//!    zero background-bearing slots to [`Color::Reset`].
+//! 2. **Interaction** — selection, hover, and inverse chips MUST go through
+//!    [`Theme::selection_overlay_style`], [`Theme::hover_overlay_style`], and
+//!    [`Theme::inverse_chip_style`] (or `inverse_canvas_style`). Do not paint
+//!    raw `Style::default().bg(theme.bg_highlight|bg_hover|…)` for interaction.
+//! 3. **Search matches** — use bold italic when transparent (see highlight
+//!    overlay); do not reuse underline (reserved for selection/hover).
+//! 4. **Final sink** — `make_buffer_transparent` clears residual backgrounds and
+//!    rewrites leftover reverse-video to bold italic. It is a backstop, not a
+//!    substitute for (2)/(3).
+//!
 //! ## Public surface on [`Theme`]
 //!
 //! | Method | Use when |

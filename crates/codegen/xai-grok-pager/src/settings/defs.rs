@@ -545,7 +545,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "see-through",
             ],
             kind: SettingKind::Bool {
-                default: ui_default.transparent_background.unwrap_or(false),
+                default: ui_default.transparent_background_enabled(),
             },
             restart_required: false,
             hidden_in_minimal: true,

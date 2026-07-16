@@ -90,11 +90,10 @@ pub(crate) fn render_cta_button(
     if disp_w == 0 {
         return None;
     }
-    let cta_style = if hovered {
-        Style::default().fg(theme.warning).bg(theme.bg_hover)
-    } else {
-        Style::default().fg(theme.warning).bg(theme.bg_base)
-    };
+    // Content ink first; interaction cue is a single Theme overlay pass.
+    let cta_style = Style::default()
+        .fg(theme.warning)
+        .bg(theme.bg_base);
     buf.set_span(x, y, &Span::styled(disp, cta_style), disp_w as u16);
     if hovered {
         buf.set_style(

@@ -229,10 +229,13 @@ impl AgentView {
         let theme = Theme::current();
 
         // Blank the entry's rendered content (style alone keeps old glyphs).
+        // Band is a single Theme selection overlay so transparent mode stays
+        // background-free.
         let blank = " ".repeat(rect.width as usize);
         for y in rect.y..rect.y.saturating_add(rect.height) {
-            buf.set_string(rect.x, y, &blank, Style::default().bg(theme.bg_visual));
+            buf.set_string(rect.x, y, &blank, Style::default());
         }
+        buf.set_style(rect, theme.selection_overlay_style(theme.bg_visual, false));
 
         // Content column, mirroring `entry_screen_area`'s layout math.
         let hl = HorizontalLayout::new(

@@ -30,7 +30,7 @@ mod test;
 
 /// Test-only: build an env `HashMap` from pairs. Shared by the `test` submodule
 /// and `embedded_editor`'s tests so the helper isn't duplicated.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn env_from(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs
         .iter()

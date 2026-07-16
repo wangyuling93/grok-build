@@ -18,11 +18,11 @@ use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
-use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
+use crate::app::subagent::{format_context_badge, format_subagent_label, SubagentInfo};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
-use crate::theme::{Theme, cache::RenderKey};
+use crate::theme::{cache::RenderKey, Theme};
 use crate::util::format_duration;
 use chrono::{DateTime, Utc};
 
@@ -108,9 +108,7 @@ fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
             let fg = span
                 .style
                 .fg
-                .and_then(|fg| {
-                    theme.blend_canvas(fg, blend_factor)
-                })
+                .and_then(|fg| theme.blend_canvas(fg, blend_factor))
                 .or(span.style.fg);
             let style = Style::default().fg(fg.unwrap_or(theme.gray));
             Span::styled(span.content.clone(), style)
@@ -374,7 +372,8 @@ impl TaskEntry {
         let type_color = if info.is_running() || info.pending_kill {
             raw_type_color
         } else {
-            theme.blend_canvas(raw_type_color, 0.45)
+            theme
+                .blend_canvas(raw_type_color, 0.45)
                 .unwrap_or(raw_type_color)
         };
         let type_style = Style::default().fg(type_color);
@@ -694,7 +693,8 @@ pub struct TasksPane {
     prev_running_count: usize,
     opened_by_auto: bool,
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
-    last_render_key: RenderKey,
+    /// Invalidates syntax/highlight caches when theme or paint mode changes.
+    highlight_cache_key: RenderKey,
 }
 
 impl Default for TasksPane {
@@ -795,7 +795,7 @@ impl TasksPane {
             prev_running_count: 0,
             opened_by_auto: false,
             highlight_cache: HashMap::new(),
-            last_render_key: Theme::render_key(),
+            highlight_cache_key: Theme::render_key(),
         }
     }
 
@@ -810,16 +810,17 @@ impl TasksPane {
         current_cron_task_id: Option<&str>,
         queued_cron_ids: &std::collections::HashSet<&str>,
     ) {
-        // Detect theme switch and refresh caches.
+        // Rebuild list chrome from the current theme each sync, and drop
+        // highlight spans when the paint identity changes.
         let render_key = Theme::render_key();
-        if render_key != self.last_render_key {
-            self.last_render_key = render_key;
-            self.list_style = ListPaneStyle {
-                show_corner_indicators: false,
-                ..ListPaneStyle::default()
-            };
+        if render_key != self.highlight_cache_key {
+            self.highlight_cache_key = render_key;
             self.highlight_cache.clear();
         }
+        self.list_style = ListPaneStyle {
+            show_corner_indicators: false,
+            ..ListPaneStyle::default()
+        };
 
         self.items.clear();
 

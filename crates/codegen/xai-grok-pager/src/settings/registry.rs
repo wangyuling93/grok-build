@@ -484,7 +484,7 @@ pub fn current_value_for(
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         crate::settings::defs::TRANSPARENT_BACKGROUND_KEY => Some(SettingValue::Bool(
-            ui.transparent_background.unwrap_or(false),
+            ui.transparent_background_enabled(),
         )),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
@@ -728,7 +728,7 @@ mod tests {
                 ) => {
                     assert_eq!(
                         *default,
-                        ui.transparent_background.unwrap_or(false),
+                        ui.transparent_background_enabled(),
                         "transparent_background default drifts from UiConfig::default()"
                     );
                 }

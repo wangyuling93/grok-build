@@ -22,6 +22,10 @@ pub struct UiConfig {
     /// When true, every TUI cell background uses the host terminal background
     /// (`Color::Reset`) so translucent terminals (e.g. Ghostty) show through.
     /// When false, themes paint their solid design backgrounds.
+    ///
+    /// `None` means "inherit / default off" so managed config is not materialised
+    /// into the user layer on unrelated saves. Use
+    /// [`Self::transparent_background_enabled`] for the effective UI flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transparent_background: Option<bool>,
     /// Simple mode. Read by pager, declared here for `serde_ignored`.
@@ -309,6 +313,13 @@ impl UiConfig {
     pub fn page_flip_on_send_enabled(&self) -> bool {
         self.page_flip_on_send
             .unwrap_or(Self::PAGE_FLIP_ON_SEND_DEFAULT)
+    }
+
+    /// Effective transparent-background flag. `None` (unset / inherited) is off.
+    #[inline]
+    #[must_use]
+    pub fn transparent_background_enabled(&self) -> bool {
+        self.transparent_background.unwrap_or(false)
     }
 
     /// True when the highlight should not timer-dismiss (`hold` / `word_select`,

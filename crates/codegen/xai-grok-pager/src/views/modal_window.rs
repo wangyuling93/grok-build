@@ -577,7 +577,6 @@ fn render_tab_bar(
                 if state.tabs_focused && !is_embedded {
                     Style::default()
                         .fg(theme.text_primary)
-                        .bg(theme.bg_visual)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -588,6 +587,17 @@ fn render_tab_bar(
                 Style::default().fg(theme.gray)
             };
             buf.set_string(cur_x, y, display, style);
+            if is_active && state.tabs_focused && !is_embedded {
+                buf.set_style(
+                    Rect {
+                        x: cur_x,
+                        y,
+                        width: label_w as u16,
+                        height: 1,
+                    },
+                    theme.selection_overlay_style(theme.bg_visual, true),
+                );
+            }
             state.tab_rects[tab_idx] = Some(Rect {
                 x: cur_x,
                 y,
@@ -774,36 +784,20 @@ pub fn render_modal_shortcuts(
             let visible_w = display.width() as u16;
             let is_hovered = hovered == Some(shortcut_idx);
 
-            // Underlay: fill cell bg with bg_highlight on hover.
-            if is_hovered {
-                let hover_bg = Style::default().bg(theme.bg_highlight);
-                for x in cur_x..cur_x + visible_w {
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_style(hover_bg);
-                    }
-                }
-            }
-
             // Split the label at the first whitespace: the leading token
             // is the "key" (rendered bold in text_secondary) and the rest
             // is the descriptive label (rendered in gray, the tertiary
             // shade). Single-token labels render entirely as the key.
             let (key_part, label_part) = split_shortcut_label(display);
 
-            let mut key_style = Style::default()
+            let key_style = Style::default()
                 .fg(theme.text_secondary)
                 .add_modifier(Modifier::BOLD);
-            if is_hovered {
-                key_style = key_style.bg(theme.bg_highlight);
-            }
             buf.set_string(cur_x, y, key_part, key_style);
 
             if !label_part.is_empty() {
                 let key_w = key_part.width() as u16;
-                let mut label_style = Style::default().fg(theme.gray);
-                if is_hovered {
-                    label_style = label_style.bg(theme.bg_highlight);
-                }
+                let label_style = Style::default().fg(theme.gray);
                 buf.set_string(cur_x + key_w, y, label_part, label_style);
             }
 

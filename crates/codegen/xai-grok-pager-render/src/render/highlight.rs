@@ -70,8 +70,20 @@ pub fn paint_match_highlights(
     }
 }
 
-/// Apply the terminal's REVERSED attribute so the fg/bg swap is native and
-/// respects the user's theme.
+/// Highlight a match cell without relying on an opaque reverse-video band when
+/// the TUI is in transparent-background mode.
+///
+/// Opaque themes keep terminal reverse video. Transparent themes use bold
+/// italic ink so search matches stay distinct from selection/hover underlines
+/// (and from the final transparent sink, which must not rewrite reverse into
+/// the same underline cue).
 fn invert_cell(cell: &mut ratatui::buffer::Cell) {
-    cell.modifier.insert(ratatui::style::Modifier::REVERSED);
+    use ratatui::style::Modifier;
+
+    if crate::theme::cache::load_transparent_background() {
+        cell.modifier.remove(Modifier::REVERSED);
+        cell.modifier.insert(Modifier::BOLD | Modifier::ITALIC);
+    } else {
+        cell.modifier.insert(Modifier::REVERSED);
+    }
 }

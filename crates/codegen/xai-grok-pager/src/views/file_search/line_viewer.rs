@@ -226,9 +226,9 @@ impl ListItem for SourceLine {
         let text_x = area.x + prefix_w;
         let text_w = area.width.saturating_sub(prefix_w);
 
-        // Apply commented background tint to the full item area.
+        // Commented-line cue: Theme selection overlay (transparent-safe).
         if self.commented {
-            buf.set_style(area, Style::default().bg(theme.bg_visual));
+            buf.set_style(area, theme.selection_overlay_style(theme.bg_visual, false));
         }
 
         // Render prefix on the first visual line (brighter when commented).

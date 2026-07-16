@@ -482,7 +482,7 @@ pub(crate) fn render_follow_ups(
     }
     const MAX_CHIP_LABEL: usize = 48;
     let chip_style = Style::default().fg(theme.link_fg);
-    let hover_style = Style::default().fg(theme.text_primary).bg(theme.bg_hover);
+    let hover_style = Style::default().fg(theme.text_primary);
     let row_end = area.x + area.width;
     let mut x = area.x;
     for (i, label) in suggestions.iter().enumerate() {
@@ -492,12 +492,15 @@ pub(crate) fn render_follow_ups(
         if x >= row_end || chip_w > row_end - x {
             break;
         }
-        let style = if hovered == Some(i) {
-            hover_style
-        } else {
-            chip_style
-        };
+        let is_hovered = hovered == Some(i);
+        let style = if is_hovered { hover_style } else { chip_style };
         buf.set_span_safe(x, area.y, &Span::styled(chip, style), chip_w);
+        if is_hovered {
+            buf.set_style(
+                Rect::new(x, area.y, chip_w, 1),
+                theme.hover_overlay_style(theme.bg_hover),
+            );
+        }
         rects.push(Rect::new(x, area.y, chip_w, 1));
         x = x.saturating_add(chip_w).saturating_add(1);
     }

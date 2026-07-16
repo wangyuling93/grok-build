@@ -6,6 +6,8 @@
 //! the event loop converts their output into [`TaskResult`] and feeds it
 //! back through dispatch.
 mod helpers;
+mod transparency_persist;
+
 use super::actions;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
@@ -15,11 +17,10 @@ pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
     persist_setting, sanitize_user_error,
 };
+pub(crate) use transparency_persist::flush_transparency_persistence;
 use helpers::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc as SyncArc, Mutex as StdMutex};
 use agent_client_protocol as acp;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use xai_acp_lib::{AcpAgentTx, acp_send};
 use actions::{
@@ -33,137 +34,6 @@ use agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::http_status_from_error;
 use xai_grok_shell::session::{ExtMethodResult, SessionInfoResponse};
-
-/// Transparency writes are spawned as independent tasks, and Tokio does not
-/// promise to first-poll those tasks in spawn order. Chain them explicitly so
-/// the last user request is also the last value written to disk.
-struct TransparencyPersistQueue {
-    tail: Option<SyncArc<Semaphore>>,
-    confirmed: Option<bool>,
-}
-
-static TRANSPARENCY_PERSIST_QUEUE: StdMutex<TransparencyPersistQueue> =
-    StdMutex::new(TransparencyPersistQueue { tail: None, confirmed: None });
-
-struct TransparencyPersistTicket {
-    predecessor: Option<SyncArc<Semaphore>>,
-    completion: SyncArc<Semaphore>,
-    turn_reached: bool,
-}
-
-impl TransparencyPersistTicket {
-    async fn wait_for_turn(&mut self) {
-        if let Some(predecessor) = &self.predecessor {
-            if let Ok(permit) = predecessor.acquire().await {
-                permit.forget();
-            }
-        }
-        self.turn_reached = true;
-    }
-}
-
-impl Drop for TransparencyPersistTicket {
-    fn drop(&mut self) {
-        if self.turn_reached || self.predecessor.is_none() {
-            self.completion.add_permits(1);
-            return;
-        }
-
-        // Preserve the chain if this task is cancelled while waiting. In the
-        // normal path every ticket reaches its turn and signals synchronously.
-        let predecessor = SyncArc::clone(self.predecessor.as_ref().expect("checked above"));
-        let completion = SyncArc::clone(&self.completion);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                if let Ok(permit) = predecessor.acquire().await {
-                    permit.forget();
-                }
-                completion.add_permits(1);
-            });
-        } else {
-            completion.add_permits(1);
-        }
-    }
-}
-
-fn transparency_persist_ticket(
-    initial_confirmed: bool,
-    generation: u64,
-) -> TransparencyPersistTicket {
-    let completion = SyncArc::new(Semaphore::new(0));
-    let mut queue = TRANSPARENCY_PERSIST_QUEUE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // Generation one is the first accepted choice for a fresh AppView. Rebase
-    // the process-wide queue in case the TUI was recreated without restarting
-    // the process (the value came from that view's freshly loaded config).
-    if generation == 1 || queue.confirmed.is_none() {
-        queue.confirmed = Some(initial_confirmed);
-    }
-    let predecessor = queue.tail.replace(SyncArc::clone(&completion));
-    TransparencyPersistTicket { predecessor, completion, turn_reached: false }
-}
-
-fn record_transparency_persist_success(value: bool) {
-    TRANSPARENCY_PERSIST_QUEUE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .confirmed = Some(value);
-}
-
-fn confirmed_transparency_value(fallback: bool) -> bool {
-    TRANSPARENCY_PERSIST_QUEUE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .confirmed
-        .unwrap_or(fallback)
-}
-
-/// Wait until every transparency write issued so far has finished. Shutdown
-/// calls this before dropping the event-loop JoinSet so a toggle immediately
-/// followed by quit is still durable for the next session.
-pub(crate) async fn flush_transparency_persistence() {
-    let tail = TRANSPARENCY_PERSIST_QUEUE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .tail
-        .clone();
-    if let Some(tail) = tail {
-        // Do not `forget` this permit: returning it keeps a completed tail
-        // observable if a fresh AppView is created in the same process.
-        match tokio::time::timeout(std::time::Duration::from_secs(3), tail.acquire()).await {
-            Ok(Ok(_permit)) => {}
-            Ok(Err(_closed)) => {
-                tracing::warn!(target: "settings", "transparency persistence queue closed during shutdown");
-            }
-            Err(_elapsed) => {
-                tracing::warn!(
-                    target: "settings",
-                    "timed out waiting for transparency persistence during shutdown"
-                );
-            }
-        }
-    }
-}
-
-fn route_transparency_persist_result(
-    result: Result<(), String>,
-    value: bool,
-    fallback_rollback: bool,
-    generation: u64,
-) -> TaskResult {
-    match result {
-        Ok(()) => {
-            record_transparency_persist_success(value);
-            TaskResult::TransparentBackgroundPersisted { value, generation }
-        }
-        Err(error) => TaskResult::TransparentBackgroundPersistFailed {
-            rollback_value: confirmed_transparency_value(fallback_rollback),
-            generation,
-            error,
-        },
-    }
-}
 
 pub(crate) fn execute(
     effect: Effect,
@@ -2023,15 +1893,13 @@ pub(crate) fn execute(
             rollback_value,
             generation,
         } => {
-            let mut ticket = transparency_persist_ticket(rollback_value, generation);
             tasks.spawn(async move {
-                ticket.wait_for_turn().await;
-                let result = persist_setting(
-                    crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
-                    crate::settings::SettingValue::Bool(value),
+                transparency_persist::persist_transparent_background(
+                    value,
+                    rollback_value,
+                    generation,
                 )
-                .await;
-                route_transparency_persist_result(result, value, rollback_value, generation)
+                .await
             });
         }
         Effect::Authenticate {

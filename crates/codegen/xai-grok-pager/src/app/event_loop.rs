@@ -1334,7 +1334,7 @@ pub(crate) async fn run(
     // Theme paint flags (transparent body, …) — owned by theme::cache, not
     // appearance, so Theme::current does not depend on the appearance module.
     crate::theme::cache::set_transparent_background(
-        app.current_ui.transparent_background.unwrap_or(false),
+        app.current_ui.transparent_background_enabled(),
     );
     // Re-derive the render-value compact flag from the hydrated `current_ui`:
     // the seed above used the pre-hydration disk read, which layered/remote
