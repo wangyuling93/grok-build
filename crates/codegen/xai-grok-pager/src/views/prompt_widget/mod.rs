@@ -2850,6 +2850,13 @@ impl PromptWidget {
         }
 
         let theme = Theme::current();
+        // These styles are captured by the textarea object rather than read
+        // during its render. Refresh them here so live theme/transparency
+        // changes also update prompts created before startup config was primed.
+        self.textarea.scrollbar_track_style = Style::default().bg(theme.bg_base);
+        self.textarea.scrollbar_thumb_style = Style::default()
+            .fg(theme.selection_border)
+            .bg(theme.bg_base);
         let bg = if let Some(override_bg) = style.bg_override {
             override_bg
         } else {

@@ -535,8 +535,7 @@ fn render_search_bar_with_label_viewport(
                     // Solid elevated paint keeps solid ink; transparent body
                     // (`Reset`) resolves via invert_ink polarity ink.
                     let paint = bg.unwrap_or(theme.bg_base);
-                    let cursor_fg = theme.invert_ink(paint);
-                    cell.set_style(Style::default().fg(cursor_fg).bg(theme.text_primary));
+                    cell.set_style(theme.inverse_chip_style(paint, theme.text_primary));
                 }
             }
         }
@@ -1211,6 +1210,10 @@ pub fn render_picker_row(
             }
             rows += 1;
         }
+    }
+
+    if hovered && !row.selected {
+        buf.set_style(row_rect, theme.hover_overlay_style(row_bg));
     }
 
     RenderedRow { rows, link_band }

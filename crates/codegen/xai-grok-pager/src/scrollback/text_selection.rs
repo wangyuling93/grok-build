@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Modifier;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -830,22 +830,16 @@ pub fn reconstruct_table_selection_text(
     }
 }
 
-/// Uniform selection band in the classic inverted colors (`invert_canvas` on
-/// `text_primary`): styled spans (inline code, links, syntax highlighting)
-/// join the band instead of inverting to their own colors.
-/// Terminal-native / colorless themes (Reset text) fall back to reverse video.
+/// Uniform selection treatment in classic inverted colors for opaque themes.
+/// Transparent themes use bold, underlined `text_primary` ink so selection
+/// remains visible without a band; terminal-native/colorless themes fall back
+/// to reverse video.
 pub(crate) fn apply_selection_highlight(theme: &Theme, cell: &mut ratatui::buffer::Cell) {
     let band = theme.text_primary;
-    let ink = theme.invert_canvas();
-    if band == Color::Reset || ink == Color::Reset {
-        cell.modifier.insert(Modifier::REVERSED);
-        return;
-    }
     // A search-match highlight painted earlier in the frame sets REVERSED;
     // left in place it would swap the band right back out.
     cell.modifier.remove(Modifier::REVERSED);
-    cell.set_fg(ink);
-    cell.set_bg(band);
+    cell.set_style(theme.inverse_canvas_style(band));
 }
 
 fn selection_slice_for_line_by_block_idx(
@@ -1247,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_highlight_transparent_solid_uses_polarity_ink() {
+    fn selection_highlight_transparent_solid_uses_non_background_cues() {
         let theme = Theme::groknight().transparent_elevated();
         assert_eq!(theme.bg_base, Color::Reset);
         assert_eq!(theme.invert_canvas(), Color::Black);
@@ -1257,10 +1251,12 @@ mod tests {
         apply_selection_highlight(&theme, &mut cell);
         assert!(
             !cell.modifier.contains(Modifier::REVERSED),
-            "transparent solid selection must clear REVERSED and paint a band"
+            "transparent solid selection must clear REVERSED"
         );
-        assert_eq!(cell.fg, Color::Black);
-        assert_eq!(cell.bg, theme.text_primary);
+        assert_eq!(cell.fg, theme.text_primary);
+        assert_eq!(cell.bg, Color::Reset);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]

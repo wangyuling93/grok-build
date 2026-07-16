@@ -807,6 +807,13 @@ pub fn render_modal_shortcuts(
                 buf.set_string(cur_x + key_w, y, label_part, label_style);
             }
 
+            if is_hovered {
+                buf.set_style(
+                    Rect::new(cur_x, y, visible_w, 1),
+                    theme.hover_overlay_style(theme.bg_highlight),
+                );
+            }
+
             hits.push(ShortcutHitArea {
                 rect: Rect {
                     x: cur_x,

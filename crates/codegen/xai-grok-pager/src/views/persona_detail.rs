@@ -366,11 +366,7 @@ fn render_detail_editor(
     if width > 0 {
         let cursor_x = x + viewport.cursor_display_column as u16;
         if let Some(cell) = buf.cell_mut((cursor_x, y)) {
-            cell.set_style(
-                Style::default()
-                    .fg(theme.invert_canvas())
-                    .bg(theme.text_primary),
-            );
+            cell.set_style(theme.inverse_canvas_style(theme.text_primary));
         }
     }
 }

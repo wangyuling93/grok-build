@@ -483,9 +483,9 @@ pub fn current_value_for(
     match key {
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
-        crate::settings::defs::TRANSPARENT_BACKGROUND_KEY => {
-            Some(SettingValue::Bool(ui.transparent_background))
-        }
+        crate::settings::defs::TRANSPARENT_BACKGROUND_KEY => Some(SettingValue::Bool(
+            ui.transparent_background.unwrap_or(false),
+        )),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         // Cache is the send-path source of truth (same pattern as group_tool_verbs).
@@ -720,6 +720,16 @@ mod tests {
                     assert_eq!(
                         *default, ui.compact_mode,
                         "compact_mode default drifts from UiConfig::default()"
+                    );
+                }
+                (
+                    crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
+                    SettingKind::Bool { default },
+                ) => {
+                    assert_eq!(
+                        *default,
+                        ui.transparent_background.unwrap_or(false),
+                        "transparent_background default drifts from UiConfig::default()"
                     );
                 }
                 // Per-tip contextual hints: `None` (inherit) → default ON.

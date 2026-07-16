@@ -20,7 +20,7 @@ use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::blocks::ToolCallBlock;
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::types::{BlockContext, DisplayMode};
-use crate::theme::{Theme, ThemeKind};
+use crate::theme::{Theme, cache::RenderKey};
 use crate::views::list_pane::{
     ListItem, ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, WrapMode,
 };
@@ -159,8 +159,9 @@ pub struct BlockViewerPane {
     was_running: bool,
     /// Task ID for BgTask viewers (for looking up stdout in central store).
     pub bg_task_id: Option<String>,
-    /// Last theme kind seen — used to detect theme switches and restyle.
-    last_theme: ThemeKind,
+    /// Last theme paint identity seen — used to detect theme or transparency
+    /// switches and rebuild cached styles.
+    last_render_key: RenderKey,
     /// Modal chrome state (close button hover, popup area, etc.).
     pub modal: ModalWindowState,
     /// Cached prepend (preamble) ContentLines from the last render. Combined
@@ -271,7 +272,7 @@ impl BlockViewerPane {
             last_generation: generation,
             was_running: entry.is_running,
             bg_task_id: None,
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             modal: ModalWindowState::new(),
             prepend_items: Vec::new(),
             text_drag: None,
@@ -325,7 +326,7 @@ impl BlockViewerPane {
             last_generation: last_output_len as u64, // reuse generation field for output length
             was_running: entry.is_running,
             bg_task_id: None,
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             modal: ModalWindowState::new(),
             prepend_items: Vec::new(),
             text_drag: None,
@@ -378,7 +379,7 @@ impl BlockViewerPane {
             last_generation: 0,
             was_running: false,
             bg_task_id: None,
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             modal: ModalWindowState::new(),
             prepend_items: Vec::new(),
             text_drag: None,
@@ -699,7 +700,7 @@ impl BlockViewerPane {
             last_generation: stdout.len() as u64,
             was_running: is_running,
             bg_task_id: Some(task_id.to_string()),
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             modal: ModalWindowState::new(),
             prepend_items: Vec::new(),
             text_drag: None,
@@ -768,7 +769,7 @@ impl BlockViewerPane {
             last_generation: 0,
             was_running: false,
             bg_task_id: None,
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             modal: ModalWindowState::new(),
             prepend_items: Vec::new(),
             text_drag: None,
@@ -867,7 +868,7 @@ impl BlockViewerPane {
             last_generation: 0,
             was_running: false,
             bg_task_id: None,
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             modal: ModalWindowState::new(),
             prepend_items: Vec::new(),
             text_drag: None,
@@ -1709,9 +1710,9 @@ impl BlockViewerPane {
         let theme = Theme::current();
 
         // Detect theme switch and rebuild items + list style.
-        let current_theme = Theme::current_kind();
-        if current_theme != self.last_theme {
-            self.last_theme = current_theme;
+        let render_key = Theme::render_key();
+        if render_key != self.last_render_key {
+            self.last_render_key = render_key;
             self.list_style = match self.kind {
                 ViewerKind::BgTask | ViewerKind::Execute => ListPaneStyle {
                     selection_bg: theme.bg_highlight,
@@ -1732,6 +1733,12 @@ impl BlockViewerPane {
                         &theme,
                     );
                     self.list_state.invalidate_layout();
+                }
+                ViewerKind::Edit => {
+                    if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block {
+                        (self.items, self.diff_meta) = Self::build_edit_items(edit, &theme);
+                        self.list_state.invalidate_layout();
+                    }
                 }
                 ViewerKind::BgTask => {
                     self.last_generation = u64::MAX;

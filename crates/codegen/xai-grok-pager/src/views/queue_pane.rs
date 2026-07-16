@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::prompt_queue::QueueEntryWire;
 use crate::render::line_utils::truncate_str;
-use crate::theme::{Theme, ThemeKind};
+use crate::theme::{Theme, cache::RenderKey};
 
 use super::list_pane::ListItem;
 
@@ -386,11 +386,12 @@ pub struct QueuePane {
     pub list_state: ListPaneState,
     /// Visual style for the list pane framework.
     list_style: ListPaneStyle,
-    /// Theme kind at the last render. Used to detect a theme switch and
+    /// Theme paint identity at the last render. Used to detect a theme or
+    /// transparency switch and
     /// refresh `list_style`, whose `selection_bg` is captured from the theme
     /// (otherwise the focused-row highlight keeps the previous theme's
     /// `bg_highlight` — e.g. GrokNight's dark band leaking into GrokDay).
-    last_theme: ThemeKind,
+    last_render_key: RenderKey,
     /// Shared visibility/focus state.
     pub overlay: OverlayState,
     /// Previous queue length — used for auto-show detection.
@@ -437,7 +438,7 @@ impl QueuePane {
             entries: Vec::new(),
             list_state,
             list_style: ListPaneStyle::default(),
-            last_theme: Theme::current_kind(),
+            last_render_key: Theme::render_key(),
             overlay: OverlayState::hidden(),
             prev_len: 0,
             send_now_rect: None,
@@ -837,9 +838,9 @@ impl QueuePane {
         // theme's `bg_highlight`; without this it would keep the theme active
         // at construction (default GrokNight, dark) after the user switches —
         // painting a dark band on a light GrokDay canvas.
-        let current_theme = Theme::current_kind();
-        if current_theme != self.last_theme {
-            self.last_theme = current_theme;
+        let render_key = Theme::render_key();
+        if render_key != self.last_render_key {
+            self.last_render_key = render_key;
             self.list_style = ListPaneStyle::default();
         }
 
@@ -906,7 +907,7 @@ impl QueuePane {
                 let hover_bg = theme.blend_canvas(theme.bg_dark, 0.5)
                     .unwrap_or(theme.bg_dark);
                 let row = Rect::new(inner.x, screen_y, inner.width, 1);
-                buf.set_style(row, Style::default().bg(hover_bg));
+                buf.set_style(row, theme.hover_overlay_style(hover_bg));
             }
         }
 

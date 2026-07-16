@@ -1567,6 +1567,14 @@ pub enum Effect {
         value: crate::settings::SettingValue,
         rollback_value: crate::settings::SettingValue,
     },
+    /// Persist transparent-background mode with request ordering. Unlike a
+    /// generic setting, a late rollback changes process-wide terminal paint,
+    /// so stale async completions must be identifiable.
+    PersistTransparentBackground {
+        value: bool,
+        rollback_value: bool,
+        generation: u64,
+    },
     /// Send structured prompt blocks to the agent.
     /// Used for skill injection where the prompt consists of
     /// multiple content blocks (metadata + skill body).
@@ -2726,6 +2734,17 @@ pub enum TaskResult {
     /// does NOT roll back in-memory state.
     SettingPersistFailedBestEffort {
         key: crate::settings::SettingKey,
+        error: String,
+    },
+    /// Transparency persisted successfully for the given request generation.
+    TransparentBackgroundPersisted {
+        value: bool,
+        generation: u64,
+    },
+    /// Transparency persistence failed for the given request generation.
+    TransparentBackgroundPersistFailed {
+        rollback_value: bool,
+        generation: u64,
         error: String,
     },
     /// Off-thread clipboard attachment probe finished (see

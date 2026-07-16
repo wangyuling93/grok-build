@@ -2074,6 +2074,12 @@ fn render_row(
     for dy in 0..content_h {
         buf.set_string(rect.x, rect.y + dy, &fill, Style::default().bg(bg));
     }
+    if hovered && !selected {
+        buf.set_style(
+            Rect::new(rect.x, rect.y, rect.width, content_h),
+            theme.hover_overlay_style(bg),
+        );
+    }
 
     // Layout columns: marker (1) | gap (1) | indent (2*n) | icon (1-2)
     //                | gap (1) | label/secondary start.
@@ -2472,6 +2478,9 @@ fn render_narrow_rows(
         } else {
             theme.bg_base
         };
+        if hovered && !selected {
+            buf.set_style(line_rect, theme.hover_overlay_style(bg));
+        }
 
         if renaming && let Some(rn) = state.rename.as_ref() {
             // Mirror the wide layout: keep the marker + state icon
@@ -3024,7 +3033,7 @@ fn render_slash_dropdown(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3149,7 +3158,7 @@ fn render_file_search_dropdown_for(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);

@@ -13,9 +13,60 @@ static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn save_config(config: &Config) -> Result<()> {
     let _guard = SAVE_LOCK.lock().await;
+    save_config_locked(config).await
+}
 
+/// Save while the caller holds [`SAVE_LOCK`].
+async fn save_config_locked(config: &Config) -> Result<()> {
     let path = user_config_path();
-    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
+    let mut root = read_user_root(&path).await?;
+    let table = root.as_table_mut().expect("user config root is a table");
+
+    merge_section(table, "cli", &config.cli);
+    merge_section(table, "models", &config.models);
+    merge_section(table, "ui", &config.ui);
+    merge_section(table, "harness", &config.harness);
+    merge_section(table, "session", &config.session);
+    merge_ask_user_question_section(table, &config.ask_user_question);
+
+    if config.skills == SkillsConfig::default() {
+        table.remove("skills");
+    } else {
+        merge_section(table, "skills", &config.skills);
+    }
+
+    write_user_root(&path, &root).await
+}
+
+/// Patch only the transparency field in the raw user layer.
+///
+/// This deliberately does not serialize the effective `Config`: doing so
+/// would materialize inherited managed values into `config.toml`. An explicit
+/// `false` is retained so a user can override managed `true`.
+pub(crate) async fn set_ui_transparent_background(value: bool) -> Result<()> {
+    let _guard = SAVE_LOCK.lock().await;
+    let path = user_config_path();
+    let mut root = read_user_root(&path).await?;
+    let table = root.as_table_mut().expect("user config root is a table");
+    let ui = table
+        .entry("ui".to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    if !matches!(ui, TomlValue::Table(_)) {
+        *ui = TomlValue::Table(TomlMap::new());
+    }
+    ui.as_table_mut()
+        .expect("ui was normalized to a table")
+        .insert(
+            "transparent_background".to_string(),
+            TomlValue::Boolean(value),
+        );
+    write_user_root(&path, &root).await
+}
+
+/// Read the raw user layer without silently replacing malformed or unreadable
+/// configuration. Only a genuinely missing file is treated as empty.
+async fn read_user_root(path: &std::path::Path) -> Result<TomlValue> {
+    let mut root: TomlValue = match tokio::fs::read_to_string(path).await {
         Ok(s) => {
             // Refuse to overwrite an unparseable config — silent fallback
             // to an empty table would permanently drop unmodeled sections.
@@ -31,26 +82,18 @@ pub async fn save_config(config: &Config) -> Result<()> {
                 }
             }
         }
-        Err(_) => TomlValue::Table(TomlMap::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            TomlValue::Table(TomlMap::new())
+        }
+        Err(err) => return Err(err.into()),
     };
     if !matches!(root, TomlValue::Table(_)) {
         root = TomlValue::Table(TomlMap::new());
     }
-    let table = root.as_table_mut().expect("root must be a table");
+    Ok(root)
+}
 
-    merge_section(table, "cli", &config.cli);
-    merge_section(table, "models", &config.models);
-    merge_section(table, "ui", &config.ui);
-    merge_section(table, "harness", &config.harness);
-    merge_section(table, "session", &config.session);
-    merge_ask_user_question_section(table, &config.ask_user_question);
-
-    if config.skills == SkillsConfig::default() {
-        table.remove("skills");
-    } else {
-        merge_section(table, "skills", &config.skills);
-    }
-
+async fn write_user_root(path: &std::path::Path, root: &TomlValue) -> Result<()> {
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -228,11 +271,14 @@ pub async fn update_config<F>(f: F) -> Result<()>
 where
     F: FnOnce(&mut Config),
 {
-    let root: TomlValue =
-        crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
+    // The lock covers the read as well as the write. Locking only inside
+    // `save_config` lets two callers derive whole `Config` snapshots from the
+    // same stale file and then overwrite one another serially.
+    let _guard = SAVE_LOCK.lock().await;
+    let root = read_user_root(&user_config_path()).await?;
     let mut cfg = load_config_from_toml(&root);
     f(&mut cfg);
-    save_config(&cfg).await
+    save_config_locked(&cfg).await
 }
 
 #[cfg(test)]
@@ -704,12 +750,29 @@ auto_light_theme = "grokday"
             "show_timestamps=None should not appear in serialized output"
         );
         assert!(
+            table.get("transparent_background").is_none(),
+            "untouched transparency must not override a managed value"
+        );
+        assert!(
             table.get("auto_dark_theme").is_none(),
             "auto_dark_theme=None should not appear in serialized output"
         );
         assert!(
             table.get("theme").is_none(),
             "theme=None should not appear in serialized output"
+        );
+
+        let explicit_false = crate::agent::config::UiConfig {
+            transparent_background: Some(false),
+            ..Default::default()
+        };
+        let explicit = TomlValue::try_from(&explicit_false).unwrap();
+        assert_eq!(
+            explicit
+                .get("transparent_background")
+                .and_then(TomlValue::as_bool),
+            Some(false),
+            "explicit false must serialize so it can override managed true"
         );
     }
 

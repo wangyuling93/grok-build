@@ -859,8 +859,28 @@ pub(in crate::app::dispatch) fn set_compact_mode(app: &mut AppView, new: bool) -
 
 /// State-only mutation for `transparent_background`.
 pub(super) fn set_transparent_background_inner(app: &mut AppView, new: bool) {
-    app.current_ui.transparent_background = new;
+    app.current_ui.transparent_background = Some(new);
     crate::theme::cache::set_transparent_background(new);
+}
+
+/// Whether changing the process-wide terminal paint mode would disrupt work
+/// that is still active, including scheduled loops between firings.
+pub(super) fn transparency_change_blocked(app: &AppView) -> bool {
+    fn agent_has_running_task(agent: &crate::app::agent_view::AgentView) -> bool {
+        agent.session.state.is_busy()
+            || agent.session.has_running_bg_tasks()
+            || !agent.session.scheduled_tasks.is_empty()
+            || agent
+                .subagent_sessions
+                .values()
+                .any(|info| info.is_running())
+            || agent
+                .subagent_views
+                .values()
+                .any(|child| agent_has_running_task(child))
+    }
+
+    app.agents.values().any(agent_has_running_task)
 }
 
 /// Set transparent terminal background. Idempotent: skips if `new == prev`.
@@ -868,10 +888,19 @@ pub(in crate::app::dispatch) fn set_transparent_background(
     app: &mut AppView,
     new: bool,
 ) -> Vec<Effect> {
-    let prev = app.current_ui.transparent_background;
+    let prev = app.current_ui.transparent_background.unwrap_or(false);
     if prev == new {
         return vec![];
     }
+    if transparency_change_blocked(app) {
+        app.show_toast("Cannot change transparency while a task is running");
+        return vec![];
+    }
+    app.transparency_persist_generation = app.transparency_persist_generation.wrapping_add(1);
+    let generation = app.transparency_persist_generation;
+    // Any rollback from an older accepted choice is superseded immediately;
+    // its eventual task completion is also rejected by the generation gate.
+    app.pending_transparency_rollback = None;
     set_transparent_background_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(
@@ -881,10 +910,10 @@ pub(in crate::app::dispatch) fn set_transparent_background(
         "setting changed"
     );
     app.show_toast(&save_success_toast("Transparent background", new));
-    vec![Effect::PersistSetting {
-        key: crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
+    vec![Effect::PersistTransparentBackground {
+        value: new,
+        rollback_value: prev,
+        generation,
     }]
 }
 

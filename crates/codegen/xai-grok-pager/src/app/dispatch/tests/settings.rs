@@ -1,5 +1,275 @@
 //! Tests for settings setters, toggles, resets, and rollback.
 use super::*;
+
+#[test]
+fn transparency_cannot_change_in_either_direction_while_a_turn_runs() {
+    let _guard = crate::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    crate::theme::cache::reset_for_test();
+    crate::theme::cache::set_transparent_background(false);
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let opaque_key = crate::theme::cache::render_key();
+    let effects = dispatch(Action::ToggleTransparentBackground, &mut app);
+    assert!(effects.is_empty(), "a rejected toggle must not persist");
+    assert_eq!(app.current_ui.transparent_background, None);
+    assert_eq!(app.transparency_persist_generation, 0);
+    assert_eq!(crate::theme::cache::render_key(), opaque_key);
+    assert_eq!(
+        read_toast(&app),
+        "Cannot change transparency while a task is running"
+    );
+
+    // Exercise the reverse direction through the settings-modal action.
+    app.current_ui.transparent_background = Some(true);
+    crate::theme::cache::set_transparent_background(true);
+    let transparent_key = crate::theme::cache::render_key();
+    let effects = dispatch(Action::SetTransparentBackground(false), &mut app);
+    assert!(effects.is_empty(), "a rejected reversal must not persist");
+    assert_eq!(app.current_ui.transparent_background, Some(true));
+    assert_eq!(app.transparency_persist_generation, 0);
+    assert_eq!(crate::theme::cache::render_key(), transparent_key);
+
+    let rollback_effects = apply_setting_rollback(
+        &mut app,
+        crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
+        &crate::settings::SettingValue::Bool(false),
+    );
+    assert!(rollback_effects.is_empty());
+    assert_eq!(
+        crate::theme::cache::render_key(),
+        transparent_key,
+        "a late persistence failure must not reverse paint mode mid-task"
+    );
+    assert_eq!(
+        app.pending_transparency_rollback,
+        Some(crate::app::app_view::PendingTransparencyRollback {
+            value: false,
+            generation: 0,
+        })
+    );
+
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::Idle;
+    crate::app::dispatch::apply_deferred_transparency_rollback(&mut app);
+    assert_eq!(app.pending_transparency_rollback, None);
+    assert_eq!(app.current_ui.transparent_background, Some(false));
+    assert_eq!(crate::theme::cache::render_key(), opaque_key);
+
+    crate::theme::cache::reset_for_test();
+}
+
+#[test]
+fn stale_transparency_persist_results_cannot_undo_the_latest_choice() {
+    let _guard = crate::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    crate::theme::cache::reset_for_test();
+    crate::theme::cache::set_transparent_background(false);
+
+    let mut app = test_app_with_agent();
+    let first = dispatch(Action::SetTransparentBackground(true), &mut app);
+    let first_generation = match first.as_slice() {
+        [
+            Effect::PersistTransparentBackground {
+                value: true,
+                rollback_value: false,
+                generation,
+            },
+        ] => *generation,
+        other => panic!("expected a transparency persistence effect, got {other:?}"),
+    };
+    let second = dispatch(Action::SetTransparentBackground(false), &mut app);
+    let second_generation = match second.as_slice() {
+        [
+            Effect::PersistTransparentBackground {
+                value: false,
+                rollback_value: true,
+                generation,
+            },
+        ] => *generation,
+        other => panic!("expected a transparency persistence effect, got {other:?}"),
+    };
+    let third = dispatch(Action::SetTransparentBackground(true), &mut app);
+    let third_generation = match third.as_slice() {
+        [
+            Effect::PersistTransparentBackground {
+                value: true,
+                rollback_value: false,
+                generation,
+            },
+        ] => *generation,
+        other => panic!("expected a transparency persistence effect, got {other:?}"),
+    };
+    assert!(first_generation < second_generation && second_generation < third_generation);
+
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    let transparent_key = crate::theme::cache::render_key();
+
+    let rejected = dispatch(Action::SetTransparentBackground(false), &mut app);
+    assert!(rejected.is_empty());
+    assert_eq!(app.transparency_persist_generation, third_generation);
+    assert_eq!(app.current_ui.transparent_background, Some(true));
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::TransparentBackgroundPersistFailed {
+            rollback_value: false,
+            generation: first_generation,
+            error: "old save failed".into(),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.current_ui.transparent_background, Some(true));
+    assert_eq!(app.pending_transparency_rollback, None);
+    assert_eq!(crate::theme::cache::render_key(), transparent_key);
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::TransparentBackgroundPersistFailed {
+            rollback_value: false,
+            generation: third_generation,
+            error: "latest save failed".into(),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.pending_transparency_rollback,
+        Some(crate::app::app_view::PendingTransparencyRollback {
+            value: false,
+            generation: third_generation,
+        })
+    );
+
+    // A late success from an older request must not clear the latest
+    // generation's deferred failure rollback.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::TransparentBackgroundPersisted {
+            value: false,
+            generation: second_generation,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(app.pending_transparency_rollback.is_some());
+    assert_eq!(app.current_ui.transparent_background, Some(true));
+    assert_eq!(crate::theme::cache::render_key(), transparent_key);
+
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::Idle;
+    crate::app::dispatch::apply_deferred_transparency_rollback(&mut app);
+    assert_eq!(app.pending_transparency_rollback, None);
+    assert_eq!(app.current_ui.transparent_background, Some(false));
+
+    crate::theme::cache::reset_for_test();
+}
+
+#[test]
+fn transparency_guard_covers_background_and_nested_subagent_work() {
+    let _guard = crate::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    crate::theme::cache::reset_for_test();
+    crate::theme::cache::set_transparent_background(false);
+
+    // A background task on an inactive top-level agent still owns terminal
+    // output and must block the process-wide paint-mode change.
+    let mut app = two_agent_app_with_bg_task();
+    let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
+    assert!(effects.is_empty());
+    assert_eq!(app.current_ui.transparent_background, None);
+
+    // The same task must remain visible to the recursive guard when its agent
+    // is hosted as a nested subagent view instead.
+    let child = app
+        .agents
+        .shift_remove(&AgentId(1))
+        .expect("child agent exists");
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .subagent_views
+        .insert("nested-child".into(), Box::new(child));
+    let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
+    assert!(effects.is_empty());
+
+    // A live subagent session also blocks after its background task finishes.
+    {
+        let nested = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut("nested-child")
+            .unwrap();
+        nested.session.bg_tasks.clear();
+        nested.subagent_sessions.insert(
+            "child-session".into(),
+            make_test_subagent("child-session", "sa-1"),
+        );
+    }
+    let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
+    assert!(effects.is_empty());
+
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .subagent_views
+        .get_mut("nested-child")
+        .unwrap()
+        .subagent_sessions
+        .get_mut("child-session")
+        .unwrap()
+        .finished = true;
+
+    // Scheduled loops remain active between firings and can wake the agent,
+    // so they also keep the paint mode fixed while the session is idle.
+    {
+        let nested = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut("nested-child")
+            .unwrap();
+        nested.session.scheduled_tasks.insert(
+            "loop-1".into(),
+            crate::app::agent::ScheduledTaskInfo {
+                task_id: "loop-1".into(),
+                prompt: "check status".into(),
+                human_schedule: "every 5m".into(),
+                created_at: std::time::Instant::now(),
+                next_fire_at: None,
+                tag: "loop".into(),
+            },
+        );
+    }
+    let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
+    assert!(effects.is_empty());
+
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .subagent_views
+        .get_mut("nested-child")
+        .unwrap()
+        .session
+        .scheduled_tasks
+        .clear();
+    let effects = dispatch(Action::SetTransparentBackground(true), &mut app);
+    assert_eq!(
+        effects.len(),
+        1,
+        "idle nested work should release the guard"
+    );
+    assert_eq!(app.current_ui.transparent_background, Some(true));
+
+    crate::theme::cache::reset_for_test();
+}
+
 /// `Action::ToggleVimMode` flips the active agent's `vim_mode` field,
 /// updates the in-process pager cache so future agents pick it up
 /// via `load_vim_mode`, emits `Effect::PersistSetting` so the new

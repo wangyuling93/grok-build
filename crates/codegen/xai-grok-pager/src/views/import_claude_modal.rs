@@ -699,6 +699,12 @@ pub fn render_import_claude_modal(
             height: 1,
         };
         Paragraph::new(line).render(row_rect, buf);
+        if is_focused && !is_blank {
+            buf.set_style(
+                row_rect,
+                theme.selection_overlay_style(theme.bg_highlight, true),
+            );
+        }
     }
 }
 
@@ -1100,6 +1106,46 @@ mod tests {
                 path: ".claude/skills".into(),
             }],
         }
+    }
+
+    #[test]
+    fn transparent_focused_import_row_uses_non_background_cue() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let mut state = ImportClaudeModalState::new(sample_plan(), PathBuf::from("/tmp"));
+        state.focus = 0;
+        let theme = Theme::groknight().transparent_elevated();
+
+        render_import_claude_modal(&mut buf, area, &mut state, &theme, false);
+
+        let content = state.content_area.expect("modal content rendered");
+        let focused_cells: Vec<_> = (content.x..content.x + content.width)
+            .map(|x| &buf[(x, content.y)])
+            .filter(|cell| cell.symbol() != " ")
+            .collect();
+        assert!(
+            !focused_cells.is_empty(),
+            "focused import row rendered text"
+        );
+        assert!(
+            focused_cells.iter().all(|cell| {
+                cell.bg == ratatui::style::Color::Reset
+                    && cell.modifier.contains(Modifier::UNDERLINED)
+            }),
+            "focused transparent import row needs a non-background cue: {focused_cells:?}"
+        );
+
+        let next_row_cells: Vec<_> = (content.x..content.x + content.width)
+            .map(|x| &buf[(x, content.y + 1)])
+            .filter(|cell| cell.symbol() != " ")
+            .collect();
+        assert!(!next_row_cells.is_empty(), "next import row rendered text");
+        assert!(
+            next_row_cells
+                .iter()
+                .all(|cell| !cell.modifier.contains(Modifier::UNDERLINED)),
+            "unfocused import row must not inherit the selection cue: {next_row_cells:?}"
+        );
     }
 
     #[test]

@@ -10,13 +10,13 @@ Grok includes seven first-class built-in themes, plus an `auto` option that foll
 
 ### Transparent background
 
-By default themes paint solid design backgrounds. Enable **Transparent background** so the body canvas and elevated surfaces use the host terminal's background instead — useful with translucent terminals such as Ghostty:
+By default themes paint solid design backgrounds. Enable **Transparent background** so every TUI background uses the host terminal's background instead — useful with translucent terminals such as Ghostty:
 
 - Slash: `/transparent` (aliases `/transparent-bg`, `/transparency`)
 - Settings → Appearance → **Transparent background**
 - Config: `~/.grok/config.toml` → `[ui] transparent_background = true`
 
-When enabled, body and passive panel fills use the host terminal background; accents and text keep full theme colors. Hover, selection, and other interaction highlights stay solid so focus remains visible. Dim/fade math still blends toward the theme's design canvas (not pure black/white), so motion and unfocus cues keep the same character as the solid theme.
+When enabled, all cell backgrounds—including panels, hover, selection, diff, code, and scrollbar fills—use the host terminal background; accents and text keep full theme colors. Selection, hover, and reverse-video cues use bold text and/or underlines so they remain visible without reintroducing an opaque background. Dim/fade math still blends toward the theme's design canvas (not pure black/white), so motion and unfocus cues keep the same character as the solid theme. The setting cannot be enabled or disabled while a foreground turn, background task, scheduled loop, or subagent is active.
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|

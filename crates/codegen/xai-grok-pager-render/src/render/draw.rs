@@ -45,6 +45,8 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::{QueueableCommand, cursor};
 use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -54,6 +56,30 @@ use xai_ratatui_inline::LinkSpan;
 /// `render` module does not depend on `app`. Re-exported from `app` as
 /// `crate::app::PagerTerminal` for existing call sites.
 pub type PagerTerminal = xai_ratatui_inline::Terminal<CrosstermBackend<TermWriter>>;
+
+/// Enforce the transparent-background contract at the final cell boundary.
+///
+/// Palette-level `Color::Reset` handles normal themed surfaces. This pass is
+/// the backstop for user-configured overrides, embedded ANSI backgrounds, and
+/// any future widget that paints a literal color. Reverse-video is converted
+/// to underline because SGR reverse would otherwise turn the foreground into
+/// an effective opaque background after the cell reaches the terminal.
+fn make_buffer_transparent(buf: &mut Buffer) {
+    for cell in &mut buf.content {
+        let old_bg = cell.bg;
+        if cell.modifier.contains(Modifier::REVERSED) {
+            cell.modifier.remove(Modifier::REVERSED);
+            cell.modifier.insert(Modifier::UNDERLINED);
+            if old_bg != Color::Reset {
+                // Preserve the visible ink of an inverse cell after removing
+                // the opaque band.
+                cell.set_fg(old_bg);
+            }
+        }
+        cell.set_bg(Color::Reset);
+    }
+}
+
 #[derive(Debug)]
 pub enum WriterEvent {
     Written(u64),
@@ -457,7 +483,11 @@ pub fn draw_frame(
     let mut link_spans: Vec<LinkSpan> = Vec::new();
     let (cursor_pos, post_flush_escapes) = {
         let mut frame = terminal.get_frame();
-        render_fn(&mut frame, &mut link_spans)
+        let result = render_fn(&mut frame, &mut link_spans);
+        if crate::theme::cache::load_transparent_background() {
+            make_buffer_transparent(frame.buffer_mut());
+        }
+        result
     };
     terminal.set_frame_links(&link_spans);
     let has_changes = terminal.flush_with_links().unwrap_or(false);
@@ -478,6 +508,109 @@ pub fn draw_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transparent_pass_clears_every_background_and_reverse_video() {
+        use ratatui::layout::Rect;
+
+        let theme = crate::theme::Theme::groknight().transparent_elevated();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_fg(Color::White).set_bg(Color::Red);
+        buf[(1, 0)]
+            .set_fg(theme.invert_canvas())
+            .set_bg(Color::Green);
+        buf[(2, 0)]
+            .set_fg(Color::Yellow)
+            .set_bg(Color::Blue)
+            .set_style(
+                ratatui::style::Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::REVERSED),
+            );
+
+        make_buffer_transparent(&mut buf);
+
+        assert!(buf.content.iter().all(|cell| cell.bg == Color::Reset));
+        assert!(
+            buf.content
+                .iter()
+                .all(|cell| !cell.modifier.contains(Modifier::REVERSED))
+        );
+        assert_eq!(buf[(0, 0)].fg, Color::White);
+        assert_eq!(buf[(1, 0)].fg, theme.invert_canvas());
+        assert_eq!(buf[(2, 0)].fg, Color::Blue);
+        assert!(buf[(2, 0)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn draw_frame_applies_transparency_gate_only_when_enabled() {
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        use ratatui::backend::CrosstermBackend;
+        use ratatui::layout::Rect;
+        use ratatui::style::Style;
+        use std::sync::mpsc;
+
+        fn render_inverse(
+            frame: &mut ratatui::Frame,
+            _links: &mut Vec<LinkSpan>,
+        ) -> (
+            Option<(u16, u16)>,
+            Option<crate::terminal::overlay::PostFlush>,
+        ) {
+            frame.buffer_mut()[(0, 0)]
+                .set_symbol("A")
+                .set_style(Style::default().fg(Color::White).bg(Color::Red));
+            frame.buffer_mut()[(1, 0)].set_symbol("X").set_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::REVERSED),
+            );
+            (None, None)
+        }
+
+        fn render_bytes(transparent: bool) -> Vec<u8> {
+            crate::theme::cache::set_transparent_background(transparent);
+            let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            let backend = CrosstermBackend::new(TermWriter::new(tx, WriterSync::new()));
+            let mut terminal = xai_ratatui_inline::Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Fixed(Rect::new(0, 0, 2, 1)),
+                },
+            )
+            .expect("build terminal");
+            draw_frame(&mut terminal, &mut CursorState::new(), render_inverse);
+            rx.try_iter().flatten().collect()
+        }
+
+        fn contains(bytes: &[u8], needle: &[u8]) -> bool {
+            bytes.windows(needle.len()).any(|window| window == needle)
+        }
+
+        let _guard = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::theme::cache::reset_for_test();
+
+        let opaque = render_bytes(false);
+        let transparent = render_bytes(true);
+        assert!(
+            contains(&opaque, b"\x1b[7m"),
+            "opaque frame must retain reverse video: {:?}",
+            String::from_utf8_lossy(&opaque),
+        );
+        assert!(
+            !contains(&transparent, b"\x1b[7m") && contains(&transparent, b"\x1b[4m"),
+            "transparent frame must replace reverse with underline: {:?}",
+            String::from_utf8_lossy(&transparent),
+        );
+
+        crate::theme::cache::reset_for_test();
+    }
+
     /// An unchanged frame must emit zero bytes to the PTY.
     #[test]
     fn idle_frame_emits_zero_bytes() {

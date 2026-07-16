@@ -1059,10 +1059,19 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
         } => {
             let rollback_effects = apply_setting_rollback(app, key, &rollback_value);
-            tracing::warn!(
-                target : "settings", ? key, ? rollback_value, % error,
-                "setting persist failed; rolled back"
-            );
+            if key == crate::settings::defs::TRANSPARENT_BACKGROUND_KEY
+                && app.pending_transparency_rollback.is_some()
+            {
+                tracing::warn!(
+                    target : "settings", ? key, ? rollback_value, % error,
+                    "setting persist failed; rollback deferred until tasks are idle"
+                );
+            } else {
+                tracing::warn!(
+                    target : "settings", ? key, ? rollback_value, % error,
+                    "setting persist failed; rolled back"
+                );
+            }
             let scrubbed = scrub_error_for_toast(&error);
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects
@@ -1075,6 +1084,71 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             let scrubbed = scrub_error_for_toast(&error);
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             vec![]
+        }
+        TaskResult::TransparentBackgroundPersisted { value, generation } => {
+            if generation == app.transparency_persist_generation {
+                app.pending_transparency_rollback = None;
+                tracing::trace!(
+                    target: "settings",
+                    value,
+                    generation,
+                    "transparency persisted"
+                );
+            } else {
+                tracing::debug!(
+                    target: "settings",
+                    value,
+                    generation,
+                    latest_generation = app.transparency_persist_generation,
+                    "ignored stale transparency persistence success"
+                );
+            }
+            vec![]
+        }
+        TaskResult::TransparentBackgroundPersistFailed {
+            rollback_value,
+            generation,
+            error,
+        } => {
+            if generation != app.transparency_persist_generation {
+                tracing::warn!(
+                    target: "settings",
+                    generation,
+                    latest_generation = app.transparency_persist_generation,
+                    %error,
+                    "ignored stale transparency persistence failure"
+                );
+                return vec![];
+            }
+
+            let rollback_effects = apply_setting_rollback(
+                app,
+                crate::settings::defs::TRANSPARENT_BACKGROUND_KEY,
+                &crate::settings::SettingValue::Bool(rollback_value),
+            );
+            if app.pending_transparency_rollback.is_some() {
+                tracing::warn!(
+                    target: "settings",
+                    generation,
+                    rollback_value,
+                    %error,
+                    "transparency persistence failed; rollback deferred until tasks are idle"
+                );
+            } else {
+                tracing::warn!(
+                    target: "settings",
+                    generation,
+                    rollback_value,
+                    %error,
+                    "transparency persistence failed; rolled back"
+                );
+            }
+            let scrubbed = scrub_error_for_toast(&error);
+            app.show_toast(&format!(
+                "\u{2717} Could not save {}: {scrubbed}",
+                crate::settings::defs::TRANSPARENT_BACKGROUND_KEY
+            ));
+            rollback_effects
         }
     }
 }

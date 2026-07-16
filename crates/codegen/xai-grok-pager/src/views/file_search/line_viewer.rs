@@ -1188,11 +1188,19 @@ fn build_shortcut_button<'a>(
     } else {
         theme.bg_base
     };
+    let hover_cue = if hovered && bg == ratatui::style::Color::Reset {
+        Modifier::UNDERLINED
+    } else {
+        Modifier::empty()
+    };
     let key_style = Style::default()
         .fg(theme.text_primary)
         .bg(bg)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme.gray).bg(bg);
+        .add_modifier(Modifier::BOLD | hover_cue);
+    let label_style = Style::default()
+        .fg(theme.gray)
+        .bg(bg)
+        .add_modifier(hover_cue);
     vec![
         Span::styled(key.to_string(), key_style),
         Span::styled(format!(" {rest}"), label_style),

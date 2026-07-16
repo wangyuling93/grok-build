@@ -1333,7 +1333,9 @@ pub(crate) async fn run(
     crate::appearance::cache::prime(&app.current_ui);
     // Theme paint flags (transparent body, …) — owned by theme::cache, not
     // appearance, so Theme::current does not depend on the appearance module.
-    crate::theme::cache::set_transparent_background(app.current_ui.transparent_background);
+    crate::theme::cache::set_transparent_background(
+        app.current_ui.transparent_background.unwrap_or(false),
+    );
     // Re-derive the render-value compact flag from the hydrated `current_ui`:
     // the seed above used the pre-hydration disk read, which layered/remote
     // config can contradict — the canonical single-writer corrects it (and
@@ -1499,20 +1501,20 @@ pub(crate) async fn run(
     if matches!(app.auth_state, AuthState::Done) {
         let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+            return Ok(finish_run(&mut app).await);
         }
         // Fetch billing early so the welcome screen can show a credit warning.
         if app.usage_visible {
             let effs = vec![super::actions::Effect::FetchAppBilling];
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+                return Ok(finish_run(&mut app).await);
             }
         }
         // Fetch changelog off the render path so the welcome screen
         // can display bullets and /release-notes uses the cached result.
         let effs = vec![super::actions::Effect::FetchChangelog];
         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+            return Ok(finish_run(&mut app).await);
         }
         if !app.has_access() {
             gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
@@ -1522,7 +1524,7 @@ pub(crate) async fn run(
     if !post_render_effects.is_empty()
         && process_effects(post_render_effects, &mut tasks, &mut app, &progress_tx)
     {
-        return Ok(make_run_result(&app));
+        return Ok(finish_run(&mut app).await);
     }
 
     // Session startup from pre-materialized CLI intent.
@@ -1590,7 +1592,7 @@ pub(crate) async fn run(
     if let Some(action) = startup_action {
         let effs = dispatch::dispatch(action, &mut app);
         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+            return Ok(finish_run(&mut app).await);
         }
         presenter.request_presentation(&mut app, terminal, false);
     } else if args.worktree.is_some() {
@@ -1604,7 +1606,7 @@ pub(crate) async fn run(
             &mut app,
         );
         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+            return Ok(finish_run(&mut app).await);
         }
         presenter.request_presentation(&mut app, terminal, false);
     }
@@ -1621,7 +1623,7 @@ pub(crate) async fn run(
         } else if !app.is_zdr_blocked() {
             let effs = dispatch::dispatch_initial_prompt(&mut app, initial_prompt.to_string());
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+                return Ok(finish_run(&mut app).await);
             }
             presenter.request_presentation(&mut app, terminal, false);
         }
@@ -1636,7 +1638,7 @@ pub(crate) async fn run(
         if app.session_startup_allowed() {
             let effs = dispatch::dispatch(Action::OpenDashboard, &mut app);
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+                return Ok(finish_run(&mut app).await);
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
@@ -1664,7 +1666,7 @@ pub(crate) async fn run(
             // user lands directly at the prompt.
             let effs = dispatch::dispatch(Action::NewSession, &mut app);
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                return Ok(make_run_result(&app));
+                return Ok(finish_run(&mut app).await);
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
@@ -1682,7 +1684,7 @@ pub(crate) async fn run(
     if let Some(effect) = app.begin_foreign_resume_detection()
         && process_effects(vec![effect], &mut tasks, &mut app, &progress_tx)
     {
-        return Ok(make_run_result(&app));
+        return Ok(finish_run(&mut app).await);
     }
 
     // Schedule the first animation tick so live updates start immediately
@@ -2011,7 +2013,7 @@ pub(crate) async fn run(
                     if !app.pending_effects.is_empty() {
                         let effs = std::mem::take(&mut app.pending_effects);
                         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                            return Ok(make_run_result(&app));
+                            return Ok(finish_run(&mut app).await);
                         }
                     }
                 }
@@ -2634,7 +2636,7 @@ pub(crate) async fn run(
                 if active_restored {
                     let drain_effects = dispatch::dispatch(Action::DrainQueue, &mut app);
                     if process_effects(drain_effects, &mut tasks, &mut app, &progress_tx) {
-                        return Ok(make_run_result(&app));
+                        return Ok(finish_run(&mut app).await);
                     }
                 }
 
@@ -2692,9 +2694,7 @@ pub(crate) async fn run(
         presenter.present_if_dirty(&mut app, terminal);
     }
 
-    app.notification_service.shutdown();
-
-    Ok(make_run_result(&app))
+    Ok(finish_run(&mut app).await)
 }
 
 /// Load `UiConfig` from the shell's layered config at startup.
@@ -2818,6 +2818,12 @@ fn sync_appearance_watcher(watcher: &mut Option<SystemAppearanceWatcher>) {
 ///
 /// `exit_info` is only consumed on the plain-quit path; a pending `relaunch`
 /// short-circuits before it is read and carries its own session id.
+async fn finish_run(app: &mut AppView) -> RunResult {
+    effects::flush_transparency_persistence().await;
+    app.notification_service.shutdown();
+    make_run_result(app)
+}
+
 fn make_run_result(app: &AppView) -> RunResult {
     let exit_info = app.active_agent().and_then(|agent| {
         let sid = agent.session.session_id.as_ref()?;

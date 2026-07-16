@@ -581,6 +581,14 @@ pub struct ScreenModeRelaunch {
     /// Active session to reopen via `--resume`.
     pub session_id: String,
 }
+/// A transparency persistence rollback held until terminal-rendering work is
+/// idle. The generation prevents an older failed save from undoing a newer
+/// accepted transparency choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PendingTransparencyRollback {
+    pub value: bool,
+    pub generation: u64,
+}
 /// Root view component — owns all application state.
 pub struct AppView {
     /// Which view is currently active.
@@ -607,6 +615,12 @@ pub struct AppView {
     /// startup; updated synchronously by `set_X_inner` so dispatch
     /// stays sans-IO.
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
+    /// Latest accepted transparency persistence request. Async completions
+    /// from older generations are ignored.
+    pub(crate) transparency_persist_generation: u64,
+    /// Persistence rollback deferred until every foreground/background task is
+    /// idle, so terminal paint mode never changes underneath running output.
+    pub(crate) pending_transparency_rollback: Option<PendingTransparencyRollback>,
     /// Working directory.
     pub cwd: PathBuf,
     /// Whether the project picker question has already been shown this session.
@@ -1240,6 +1254,8 @@ impl AppView {
             registry: ActionRegistry::defaults(),
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+            transparency_persist_generation: 0,
+            pending_transparency_rollback: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             project_picker_shown: false,
             project_picker_disabled: false,
@@ -3798,6 +3814,7 @@ impl AppView {
     /// synchronized output, cursor blink preservation). See that module's
     /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
+        crate::app::dispatch::apply_deferred_transparency_rollback(self);
         self.draw_inner(terminal);
         crate::memory_release::run_deferred_release();
     }
@@ -5235,6 +5252,8 @@ pub(crate) mod tests {
             registry: ActionRegistry::defaults(),
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+            transparency_persist_generation: 0,
+            pending_transparency_rollback: None,
             cwd: std::path::PathBuf::from("/tmp"),
             project_picker_shown: true,
             project_picker_disabled: false,

@@ -616,6 +616,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // Booleans.
             "compact_mode",
             "screen_mode",
+            // Transparent background (hidden in minimal; Appearance).
+            "transparent_background",
             "show_timestamps",
             "show_timeline",
             // PAGER-owned page_flip_on_send (Appearance).
@@ -989,6 +991,75 @@ fn settings_list_row_bg_terminal_native_elevates_selection() {
     assert_eq!(settings_list_row_bg(&theme, false, true), Color::DarkGray);
     assert_eq!(settings_list_row_bg(&theme, false, false), Color::Reset);
     assert_eq!(settings_list_row_bg(&theme, true, true), Color::DarkGray);
+}
+
+#[test]
+fn settings_list_row_bg_rgb_theme_uses_theme_tokens() {
+    let theme = Theme::current();
+    if matches!(theme.bg_visual, Color::Reset) {
+        return;
+    }
+    assert_eq!(settings_list_row_bg(&theme, true, false), theme.bg_visual);
+    assert_eq!(settings_list_row_bg(&theme, false, true), theme.bg_hover);
+    assert_eq!(settings_list_row_bg(&theme, false, false), theme.bg_base);
+}
+
+#[test]
+fn transparent_selected_setting_row_uses_non_background_cue() {
+    let meta = SettingMeta {
+        key: "test-key",
+        category: SettingCategory::Appearance,
+        owner: SettingOwner::Shared,
+        label: "Selected setting",
+        description: "Test description.",
+        keywords: &["test"],
+        kind: SettingKind::Bool { default: false },
+        restart_required: false,
+        hidden_in_minimal: false,
+    };
+    let area = Rect::new(0, 0, 60, 1);
+    let mut buf = Buffer::empty(area);
+    let theme = Theme::groknight().transparent_elevated();
+
+    render_setting_row(
+        &mut buf,
+        area,
+        &meta,
+        &SettingValue::Bool(false),
+        20,
+        true,
+        &theme,
+        false,
+        false,
+    );
+
+    let label_x = (0..area.width)
+        .find(|&x| buf[(x, 0)].symbol() == "S")
+        .expect("setting label rendered");
+    let selected = &buf[(label_x, 0)];
+    assert_eq!(selected.bg, ratatui::style::Color::Reset);
+    assert!(
+        selected.modifier.contains(Modifier::UNDERLINED),
+        "selected transparent setting row needs a non-background cue: {selected:?}"
+    );
+
+    let mut unselected_buf = Buffer::empty(area);
+    render_setting_row(
+        &mut unselected_buf,
+        area,
+        &meta,
+        &SettingValue::Bool(false),
+        20,
+        false,
+        &theme,
+        false,
+        false,
+    );
+    let unselected = &unselected_buf[(label_x, 0)];
+    assert!(
+        !unselected.modifier.contains(Modifier::UNDERLINED),
+        "unselected setting row must not inherit the selection cue: {unselected:?}"
+    );
 }
 
 /// `MouseEventKind::Moved` over a setting row's hit-rect sets

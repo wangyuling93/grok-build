@@ -16,7 +16,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::StatefulWidget;
 
 use super::layout::WrapMode;
@@ -35,7 +35,8 @@ use crate::render::scrollbar::{maybe_split_for_scrollbar, render_scrollbar_style
 ///
 /// For each visible item, the framework applies overlays in order:
 /// 1. **Item content** — `ListItem::render()` paints text/chrome.
-/// 2. **Selection bg** — framework overlays `selection_bg` on the selected row(s).
+/// 2. **Selection** — framework overlays the configured band, or non-background
+///    cues when that band is transparent.
 /// 3. **Match highlight** — inverts fg/bg on matched cells (style inversion).
 /// 4. **Truncation ellipsis** — `…` on the last row if the item was truncated.
 ///
@@ -356,10 +357,11 @@ impl<T: ListItem> ListPane<'_, T> {
                 }
             }
 
-            // --- Post-pass 1: Selection background overlay ---
-            // Patches only the bg of each cell, preserving fg, content, and
-            // modifiers.  Applied after item render so items don't need to
-            // know about selection colors.
+            // --- Post-pass 1: Selection overlay ---
+            // Opaque palettes patch only the background. Transparent palettes
+            // add underline/bold cues instead, preserving content and colors.
+            // Applied after item render so items don't need to know about the
+            // active paint mode.
             // Shown when focused, or when `show_selection_when_unfocused` is set.
             let show_sel = self.focused || state.show_selection_when_unfocused();
             if is_selected && show_sel {
@@ -378,7 +380,17 @@ impl<T: ListItem> ListPane<'_, T> {
                     width: area.width,
                     height: rows_to_render,
                 };
-                buf.set_style(sel_area, Style::default().bg(bg));
+                let selection_style = if bg == Color::Reset {
+                    let cue = if is_cursor {
+                        Modifier::BOLD | Modifier::UNDERLINED
+                    } else {
+                        Modifier::UNDERLINED
+                    };
+                    Style::default().add_modifier(cue)
+                } else {
+                    Style::default().bg(bg)
+                };
+                buf.set_style(sel_area, selection_style);
             }
 
             // --- Post-pass 2: Match highlight overlay ---
@@ -971,6 +983,32 @@ mod tests {
                 "match col {col} should have REVERSED modifier"
             );
         }
+    }
+
+    #[test]
+    fn transparent_selection_uses_non_background_cursor_cue() {
+        let items = vec![RenderTestItem::new(0, "selected")];
+        let mut state = ListPaneState::new(WrapMode::NoWrap, false);
+        let area = Rect::new(0, 0, 20, 2);
+        state.prepare_layout(&items, area.width, area.height);
+
+        let style = ListPaneStyle {
+            selection_bg: Color::Reset,
+            visual_select_bg: Color::Reset,
+            ..ListPaneStyle::default()
+        };
+        let mut buf = Buffer::empty(area);
+        StatefulWidget::render(
+            ListPane::new(&items).style(style),
+            area,
+            &mut buf,
+            &mut state,
+        );
+
+        let cell = &buf[(1, 0)];
+        assert_eq!(cell.bg, Color::Reset);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
     }
 
     /// Regression: search highlight in Wrap mode should highlight the correct

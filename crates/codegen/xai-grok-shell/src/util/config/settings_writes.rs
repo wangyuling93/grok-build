@@ -1,4 +1,4 @@
-use super::persist::update_config;
+use super::persist::{set_ui_transparent_background, update_config};
 use anyhow::Result;
 
 // ---------------------------------------------------------------------------
@@ -11,9 +11,9 @@ pub async fn set_compact_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.compact_mode = value).await
 }
 
-/// Persist `[ui].transparent_background` via `update_config`.
+/// Persist only `[ui].transparent_background` in the raw user layer.
 pub async fn set_transparent_background(value: bool) -> Result<()> {
-    update_config(|cfg| cfg.ui.transparent_background = value).await
+    set_ui_transparent_background(value).await
 }
 
 /// Persist `[ui].show_timestamps` via `update_config`. `UiConfig::show_timestamps`

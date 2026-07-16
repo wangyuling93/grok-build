@@ -168,11 +168,10 @@ pub fn render_dropdown(
         if line_idx >= flat_lines.len() {
             break;
         }
-        row_items.push(
-            item_starts
-                .partition_point(|&s| s <= line_idx)
-                .saturating_sub(1),
-        );
+        let item_idx = item_starts
+            .partition_point(|&s| s <= line_idx)
+            .saturating_sub(1);
+        row_items.push(item_idx);
         let y = area.y + vis_row as u16;
         let line = &flat_lines[line_idx];
         // Skip rows that fall outside the buffer (resize race).
@@ -189,6 +188,9 @@ pub fn render_dropdown(
         };
         buf.set_style(clamped, Style::default().bg(row_bg));
         buf.set_line_safe(area.x, y, line, row_w as u16);
+        if hovered == Some(item_idx) && item_idx != selected {
+            buf.set_style(clamped, theme.hover_overlay_style(row_bg));
+        }
     }
 
     // ── Scrollbar ───────────────────────────────────────────────────────

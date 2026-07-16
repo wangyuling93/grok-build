@@ -96,6 +96,12 @@ pub(crate) fn render_cta_button(
         Style::default().fg(theme.warning).bg(theme.bg_base)
     };
     buf.set_span(x, y, &Span::styled(disp, cta_style), disp_w as u16);
+    if hovered {
+        buf.set_style(
+            Rect::new(x, y, disp_w as u16, 1),
+            theme.hover_overlay_style(theme.bg_hover),
+        );
+    }
     // Reservation-first: the button is already painted; the dim caption follows
     // one space later and drops WHOLE when it won't fit (never a partial).
     if let Some(caption) = caption {

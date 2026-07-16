@@ -675,6 +675,9 @@ pub fn render_permission_view(
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
         buf.set_line(content_x, y, &line, content_width);
+        if is_hovered && !(is_cursor && focused) {
+            buf.set_style(row_rect, theme.hover_overlay_style(row_bg));
+        }
         y += 1;
     }
 

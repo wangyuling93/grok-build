@@ -48,7 +48,7 @@ pub(super) use queue::{
 };
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::dispatch;
-pub(crate) use settings::ui::refresh_open_settings_modals;
+pub(crate) use settings::ui::{apply_deferred_transparency_rollback, refresh_open_settings_modals};
 pub(crate) use status::commit_minimal_update_notice;
 pub(crate) use turn::reconcile_overdue_turn_ends;
 

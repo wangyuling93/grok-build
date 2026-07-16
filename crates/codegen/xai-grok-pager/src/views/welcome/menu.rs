@@ -133,8 +133,50 @@ pub fn render_menu(
             }
         }
 
+        if is_selected {
+            buf.set_style(
+                row_rect,
+                theme.selection_overlay_style(theme.bg_highlight, true),
+            );
+        }
+
         y += 1;
     }
 
     rects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn transparent_selected_row_uses_non_background_cue() {
+        let area = Rect::new(0, 0, 80, 3);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::groknight().transparent_elevated();
+        let rects = render_menu(
+            area,
+            &mut buf,
+            &theme,
+            &[("Enter", "Start"), ("Esc", "Quit")],
+            Some(0),
+            None,
+            0,
+        );
+
+        let selected = &buf[(rects[0].x, rects[0].y)];
+        assert_eq!(selected.bg, Color::Reset);
+        assert!(
+            selected.modifier.contains(Modifier::UNDERLINED),
+            "selected transparent menu row needs a non-background cue: {selected:?}"
+        );
+
+        let unselected = &buf[(rects[1].x, rects[1].y)];
+        assert!(
+            !unselected.modifier.contains(Modifier::UNDERLINED),
+            "unselected menu row must not inherit the selection cue: {unselected:?}"
+        );
+    }
 }

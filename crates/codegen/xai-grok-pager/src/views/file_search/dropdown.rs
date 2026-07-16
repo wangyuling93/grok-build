@@ -234,4 +234,16 @@ fn render_fuzzy_item(
         cell.set_char('/');
         cell.set_style(normal_style);
     }
+
+    if is_hovered {
+        buf.set_style(
+            Rect {
+                x,
+                y,
+                width,
+                height: 1,
+            },
+            theme.hover_overlay_style(row_bg),
+        );
+    }
 }

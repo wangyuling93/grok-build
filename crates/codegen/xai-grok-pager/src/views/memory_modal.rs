@@ -619,6 +619,10 @@ if idx == filt_idx)
                     );
                 }
             }
+
+            if is_selected {
+                buf.set_style(row_rect, theme.selection_overlay_style(bg, true));
+            }
         }
     }
 

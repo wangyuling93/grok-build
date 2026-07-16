@@ -1694,7 +1694,7 @@ impl AgentView {
                     content_line_y = Some(line_y);
                     let line_x = gap_x + 3;
                     let line_end = (gap_x + gap_w).saturating_sub(2);
-                    let line_style = ratatui::style::Style::default().fg(theme.bg_light);
+                    let line_style = ratatui::style::Style::default().fg(theme.gray_dim);
                     for x in line_x..line_end {
                         if let Some(cell) = buf.cell_mut((x, line_y)) {
                             cell.set_symbol("╌");
@@ -2729,7 +2729,7 @@ impl AgentView {
                         panel_area,
                         Style::default().fg(theme.text_primary).bg(theme.bg_light),
                     );
-                    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+                    let border_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
                     let border_line = Line::styled("─".repeat(panel_width as usize), border_style);
                     buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
                     buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);
@@ -2872,7 +2872,7 @@ impl AgentView {
                     panel_area,
                     Style::default().fg(theme.text_primary).bg(theme.bg_light),
                 );
-                let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+                let border_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
                 let border_line =
                     Line::styled("\u{2500}".repeat(panel_width as usize), border_style);
                 buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
@@ -3035,6 +3035,17 @@ impl AgentView {
                                 cell.set_style(st);
                             }
                             col += cw;
+                        }
+                        if is_hovered {
+                            buf.set_style(
+                                Rect {
+                                    x: items_x,
+                                    y: row_y,
+                                    width: fill_width,
+                                    height: 1,
+                                },
+                                theme.hover_overlay_style(row_bg),
+                            );
                         }
                     }
                     if needs_scrollbar {

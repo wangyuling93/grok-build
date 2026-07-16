@@ -1,6 +1,6 @@
 //! ThinkingBlock - displays agent thinking/reasoning content with markdown support.
 
-use ratatui::style::{Color, Stylize};
+use ratatui::style::Stylize;
 use ratatui::text::{Line, Span, Text};
 
 use crate::render::color::blend_line_with_default;
@@ -226,13 +226,17 @@ impl ThinkingBlock {
         line: &Line<'static>,
         joiner: &Option<String>,
         strip: &QuoteBarStrip,
-        bg_base: Color,
-        fg_default: Color,
+        theme: &Theme,
         blend_factor: f32,
     ) -> BlockLine {
         let mut content = line.clone();
         let selectable = strip.selectable(&mut content);
-        let blended = blend_line_with_default(content, bg_base, fg_default, blend_factor);
+        let blended = blend_line_with_default(
+            content,
+            theme.design_canvas(),
+            theme.text_primary,
+            blend_factor,
+        );
         let mut block_line = BlockLine::styled(blended)
             .with_selection_range(Some(0))
             .with_joiner(joiner.clone());
@@ -254,8 +258,6 @@ impl ThinkingBlock {
             }
 
             let theme = Theme::current();
-            let bg_base = theme.bg_base;
-            let fg_default = theme.text_primary;
 
             let total = wrapped.lines.len();
             if total <= n {
@@ -270,8 +272,7 @@ impl ThinkingBlock {
                                 line,
                                 joiner,
                                 &strip,
-                                bg_base,
-                                fg_default,
+                                &theme,
                                 blend_factor,
                             )
                         })
@@ -294,8 +295,7 @@ impl ThinkingBlock {
                     &wrapped.lines[i],
                     &wrapped.joiners[i],
                     &strip,
-                    bg_base,
-                    fg_default,
+                    &theme,
                     blend_factor,
                 ));
             }
@@ -322,8 +322,6 @@ impl ThinkingBlock {
             }
 
             let theme = Theme::current();
-            let bg_base = theme.bg_base;
-            let fg_default = theme.text_primary;
 
             let output = BlockOutput {
                 lines: wrapped
@@ -335,8 +333,7 @@ impl ThinkingBlock {
                             line,
                             joiner,
                             &strip,
-                            bg_base,
-                            fg_default,
+                            &theme,
                             blend_factor,
                         )
                     })

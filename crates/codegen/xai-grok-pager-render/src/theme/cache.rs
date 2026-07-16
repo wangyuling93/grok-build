@@ -16,6 +16,18 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use super::ThemeKind;
 use super::system_appearance;
 
+/// Identity of every global input that can change rendered theme styles.
+///
+/// Render caches must use this instead of [`ThemeKind`] alone: transparent
+/// mode changes the palette without changing the selected theme kind, while
+/// terminal-native mode replaces the palette entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderKey {
+    kind: ThemeKind,
+    transparent_background: bool,
+    terminal_native: bool,
+}
+
 /// In-memory theme kind, packed via [`ThemeKind::encode`].
 /// Loaded from disk once at startup via `load_from_disk()`, then kept
 /// in sync by `set()`.
@@ -35,7 +47,7 @@ static AUTO_MODE: AtomicBool = AtomicBool::new(false);
 /// session (minimal mode — no theming).
 static TERMINAL_NATIVE_LOCK: AtomicBool = AtomicBool::new(false);
 
-/// Optional transparent body fills (`[ui].transparent_background`).
+/// Optional transparent TUI backgrounds (`[ui].transparent_background`).
 /// Co-located with theme kind so [`Theme::current`] does not reach into
 /// the appearance cache. Primed from `UiConfig` at startup; updated on
 /// settings toggle/rollback. Default OFF.
@@ -50,6 +62,16 @@ pub fn load_transparent_background() -> bool {
 /// Replace the transparent-background flag (optimistic update or rollback).
 pub fn set_transparent_background(enabled: bool) {
     TRANSPARENT_BACKGROUND.store(enabled, Ordering::Relaxed);
+}
+
+/// Return the complete identity used by theme-dependent render caches.
+#[must_use]
+pub fn render_key() -> RenderKey {
+    RenderKey {
+        kind: current_kind(),
+        transparent_background: load_transparent_background(),
+        terminal_native: terminal_native_locked(),
+    }
 }
 
 /// Cached auto-theme configuration (which themes map to dark/light).
@@ -332,6 +354,19 @@ mod tests {
         f();
         system_appearance::clear_mock();
         reset_for_test();
+    }
+
+    #[test]
+    fn render_key_tracks_transparency_in_both_directions() {
+        with_test_env(|| {
+            let opaque = render_key();
+            set_transparent_background(true);
+            let transparent = render_key();
+            assert_ne!(transparent, opaque);
+
+            set_transparent_background(false);
+            assert_eq!(render_key(), opaque);
+        });
     }
 
     /// Pre-populate the auto-theme config cache for testing.

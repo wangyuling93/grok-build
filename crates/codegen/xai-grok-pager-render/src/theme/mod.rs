@@ -200,7 +200,7 @@ impl Theme {
         } else {
             adapted
         };
-        // Paint-time modes (transparent body, …) — shared with tests via
+        // Paint-time modes (transparent backgrounds, …) — shared with tests via
         // [`Theme::apply_paint_mode`].
         adapted.apply_paint_mode()
     }
@@ -208,6 +208,13 @@ impl Theme {
     /// Get the currently active theme kind.
     pub fn current_kind() -> ThemeKind {
         cache::current_kind()
+    }
+
+    /// Identity for caches whose styles depend on the active paint palette.
+    /// Unlike [`Self::current_kind`], this also changes when transparent or
+    /// terminal-native paint mode changes.
+    pub fn render_key() -> cache::RenderKey {
+        cache::render_key()
     }
 
     /// Whether this theme paints no diff row bands (`diff_*_bg` = `Reset`),

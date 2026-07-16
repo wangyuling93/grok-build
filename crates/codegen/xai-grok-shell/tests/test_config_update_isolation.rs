@@ -170,3 +170,97 @@ async fn update_config_does_not_leak_managed_config_values() {
         "channel from managed_config.toml leaked into user config. Raw:\n{raw}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn unrelated_save_does_not_claim_managed_transparency() {
+    let home = test_home();
+    reset_config_files(home);
+    fs::write(home.join("config.toml"), "[ui]\nyolo = false\n").unwrap();
+    fs::write(
+        home.join("managed_config.toml"),
+        "[ui]\ntransparent_background = true\n",
+    )
+    .unwrap();
+
+    xai_grok_shell::util::config::update_config(|cfg| cfg.ui.yolo = true)
+        .await
+        .expect("unrelated update should succeed");
+
+    let raw = fs::read_to_string(home.join("config.toml")).unwrap();
+    let user: toml::Value = toml::from_str(&raw).unwrap();
+    assert!(
+        user.get("ui")
+            .and_then(|ui| ui.get("transparent_background"))
+            .is_none(),
+        "an unrelated save must leave managed transparency inherited; raw:\n{raw}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn explicit_false_can_override_managed_transparency() {
+    let home = test_home();
+    reset_config_files(home);
+    fs::write(
+        home.join("managed_config.toml"),
+        "[ui]\ntransparent_background = true\n",
+    )
+    .unwrap();
+
+    xai_grok_shell::util::config::set_transparent_background(false)
+        .await
+        .expect("explicit transparency update should succeed");
+
+    let raw = fs::read_to_string(home.join("config.toml")).unwrap();
+    let user: toml::Value = toml::from_str(&raw).unwrap();
+    assert_eq!(
+        user.get("ui")
+            .and_then(|ui| ui.get("transparent_background"))
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "explicit false must remain present in the user layer; raw:\n{raw}"
+    );
+
+    let effective = xai_grok_shell::config::load_effective_config().unwrap();
+    let effective_cfg = xai_grok_shell::util::config::load_config_from_toml(&effective);
+    assert_eq!(
+        effective_cfg.ui.transparent_background,
+        Some(false),
+        "the explicit user value must override managed true"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn concurrent_transparency_and_unrelated_updates_do_not_clobber_each_other() {
+    let home = test_home();
+    reset_config_files(home);
+    fs::write(
+        home.join("config.toml"),
+        "[ui]\ntransparent_background = true\nyolo = false\n",
+    )
+    .unwrap();
+
+    let (transparent_result, unrelated_result) = tokio::join!(
+        xai_grok_shell::util::config::set_transparent_background(false),
+        xai_grok_shell::util::config::update_config(|cfg| cfg.ui.yolo = true),
+    );
+    transparent_result.expect("transparency update should succeed");
+    unrelated_result.expect("unrelated update should succeed");
+
+    let raw = fs::read_to_string(home.join("config.toml")).unwrap();
+    let user: toml::Value = toml::from_str(&raw).unwrap();
+    let ui = user.get("ui").expect("ui table");
+    assert_eq!(
+        ui.get("transparent_background")
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "latest transparency value was clobbered; raw:\n{raw}"
+    );
+    assert_eq!(
+        ui.get("yolo").and_then(toml::Value::as_bool),
+        Some(true),
+        "unrelated update was clobbered; raw:\n{raw}"
+    );
+}

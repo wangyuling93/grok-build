@@ -1758,6 +1758,7 @@ fn registry_kind_membership_through_pr_14() {
         bool_keys,
         vec![
             "compact_mode",
+            "transparent_background",
             "group_tool_verbs",
             "collapsed_edit_blocks",
             "invert_scroll",
@@ -2012,6 +2013,7 @@ fn settings_value_payload_matches_kind() {
         let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
         match outcome {
             SettingsKeyOutcome::Action(Action::SetCompactMode(_))
+            | SettingsKeyOutcome::Action(Action::SetTransparentBackground(_))
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
@@ -2115,7 +2117,7 @@ fn repeat_j_navigation_is_processed() {
     };
     let outcome = handle_settings_key(&mut s, &key);
     // From the initial state (compact_mode), Repeat j advances to the next
-    // Appearance row: screen_mode.
+    // Appearance row: screen_mode (then transparent_background).
     assert!(matches!(outcome, SettingsKeyOutcome::Changed));
     match &s.rows[s.selected] {
         RowEntry::Setting { key, .. } => assert_eq!(*key, "screen_mode"),

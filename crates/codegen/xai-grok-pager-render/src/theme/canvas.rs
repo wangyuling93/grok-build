@@ -1,7 +1,7 @@
 //! Transparent body canvas + solid endpoints for blend / invert math.
 //!
-//! Paint fills (`bg_base`, elevated passive surfaces) may be [`Color::Reset`]
-//! under `[ui].transparent_background`. Blend and inverse-chip math still need
+//! Every paint fill may be [`Color::Reset`] under
+//! `[ui].transparent_background`. Blend and inverse-chip math still need
 //! a solid design endpoint — that is [`Theme::canvas`] / [`Theme::design_canvas`].
 //!
 //! ## Public surface on [`Theme`]
@@ -14,6 +14,8 @@
 //! | [`Theme::blend_canvas`] | Body-canvas blend (no paint arg) |
 //! | [`Theme::invert_ink`] | Inverse-chip ink when paint may be elevated **or** `Reset` |
 //! | [`Theme::invert_canvas`] | Body inverse-chip ink (no paint arg) |
+//! | [`Theme::selection_overlay_style`] | Selection band with a transparent-safe text cue |
+//! | [`Theme::hover_overlay_style`] | Hover band with a transparent-safe text cue |
 //!
 //! Body dim: `dim_area(buf, area, theme.design_canvas(), factor)`.
 //! Body accent: `theme.blend_canvas(accent, opacity)`.
@@ -22,7 +24,7 @@
 //! `blend_area(..., theme.solid_paint(local_paint), ...)`.
 //! Elevated inverse chip: `theme.invert_ink(paint)`.
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 use super::Theme;
 
@@ -42,10 +44,10 @@ impl Theme {
         }
     }
 
-    /// Force body + passive elevated surfaces to [`Color::Reset`] so the host
-    /// terminal profile shows through. Text, accents, borders, semantic diff
-    /// bands, and **interaction** surfaces (`bg_hover`, `bg_visual`,
-    /// `bg_dark`, `bg_highlight`) stay solid so hover/selection still read.
+    /// Force every background-bearing palette slot to [`Color::Reset`] so the
+    /// host terminal profile shows through. Text, accents, and borders remain
+    /// solid; interaction state is communicated without painting an opaque
+    /// background.
     ///
     /// Leaves [`Self::canvas`] alone — that is the solid design endpoint for
     /// blend / fade / dim math (or [`Color::Reset`] for terminal-native).
@@ -56,12 +58,16 @@ impl Theme {
         Self {
             bg_base: Color::Reset,
             bg_light: Color::Reset,
+            bg_dark: Color::Reset,
+            bg_highlight: Color::Reset,
+            bg_hover: Color::Reset,
             bg_terminal: Color::Reset,
+            scrollbar_bg: Color::Reset,
+            diff_delete_bg: Color::Reset,
+            diff_insert_bg: Color::Reset,
+            bg_visual: Color::Reset,
             md_code_bg: Color::Reset,
             paste_bg: Color::Reset,
-            scrollbar_bg: Color::Reset,
-            // Interaction / selection bands stay solid for legibility.
-            // bg_dark, bg_highlight, bg_hover, bg_visual left as-is via ..self.
             // canvas left as-is — design endpoint for math.
             ..self
         }
@@ -160,6 +166,71 @@ impl Theme {
     pub fn invert_canvas(&self) -> Color {
         self.invert_ink(self.bg_base)
     }
+
+    /// Style an inverse chip without relying on an opaque background when the
+    /// body canvas is transparent.
+    ///
+    /// Opaque themes retain the classic inverse band. Transparent solid themes
+    /// use the band color as bold, underlined ink instead, while terminal-native
+    /// themes keep reverse video so the host profile chooses the polarity.
+    #[must_use]
+    pub fn inverse_chip_style(&self, paint: Color, band: Color) -> Style {
+        let transparent_solid = self.bg_base == Color::Reset && self.canvas != Color::Reset;
+        if transparent_solid {
+            return Style::default()
+                .fg(band)
+                .bg(Color::Reset)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                .remove_modifier(Modifier::REVERSED);
+        }
+
+        let ink = self.invert_ink(paint);
+        if band == Color::Reset || ink == Color::Reset {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(ink).bg(band)
+        }
+    }
+
+    /// Body-canvas convenience wrapper for [`Self::inverse_chip_style`].
+    #[must_use]
+    pub fn inverse_canvas_style(&self, band: Color) -> Style {
+        self.inverse_chip_style(self.bg_base, band)
+    }
+
+    /// Style a selected row without relying solely on a painted background.
+    ///
+    /// Opaque palettes keep their selection band. When either the body or the
+    /// requested band is transparent, selection is expressed with underline;
+    /// the cursor row is also bold so it remains distinct from a visual range.
+    /// This is intended as a post-pass after row content has been rendered.
+    #[must_use]
+    pub fn selection_overlay_style(&self, background: Color, is_cursor: bool) -> Style {
+        if self.bg_base == Color::Reset || background == Color::Reset {
+            let cue = if is_cursor {
+                Modifier::BOLD | Modifier::UNDERLINED
+            } else {
+                Modifier::UNDERLINED
+            };
+            Style::default().add_modifier(cue)
+        } else {
+            Style::default().bg(background)
+        }
+    }
+
+    /// Style a hovered target without relying solely on a painted background.
+    ///
+    /// Opaque palettes retain the requested hover band. Background-free
+    /// palettes underline the target instead so pointer feedback remains
+    /// visible while every cell background stays transparent.
+    #[must_use]
+    pub fn hover_overlay_style(&self, background: Color) -> Style {
+        if self.bg_base == Color::Reset || background == Color::Reset {
+            Style::default().add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default().bg(background)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -182,22 +253,23 @@ mod tests {
         assert!(matches!(solid.bg_base, Color::Rgb(_, _, _)));
         assert!(matches!(solid.bg_light, Color::Rgb(_, _, _)));
         let see = solid.transparent_elevated();
-        // Body + passive elevated → Reset.
+        // Every palette background → Reset.
         for (name, color) in [
             ("bg_base", see.bg_base),
             ("bg_light", see.bg_light),
+            ("bg_dark", see.bg_dark),
+            ("bg_highlight", see.bg_highlight),
+            ("bg_hover", see.bg_hover),
             ("bg_terminal", see.bg_terminal),
+            ("scrollbar_bg", see.scrollbar_bg),
+            ("diff_delete_bg", see.diff_delete_bg),
+            ("diff_insert_bg", see.diff_insert_bg),
+            ("bg_visual", see.bg_visual),
             ("md_code_bg", see.md_code_bg),
             ("paste_bg", see.paste_bg),
-            ("scrollbar_bg", see.scrollbar_bg),
         ] {
             assert_eq!(color, Color::Reset, "{name} must be transparent");
         }
-        // Interaction / selection bands stay solid for legibility.
-        assert_eq!(see.bg_dark, solid.bg_dark);
-        assert_eq!(see.bg_highlight, solid.bg_highlight);
-        assert_eq!(see.bg_hover, solid.bg_hover);
-        assert_eq!(see.bg_visual, solid.bg_visual);
         // Accents / text stay solid.
         assert_eq!(see.text_primary, solid.text_primary);
         assert_eq!(see.accent_user, solid.accent_user);
@@ -209,6 +281,42 @@ mod tests {
         assert_eq!(see.solid_paint(Color::Reset), see.design_canvas());
         assert_eq!(see.solid_paint(solid.bg_dark), solid.bg_dark);
         assert!(see.is_dark());
+    }
+
+    #[test]
+    fn transparent_inverse_chips_use_non_background_cues() {
+        let theme = Theme::groknight().transparent_elevated();
+        let style = theme.inverse_canvas_style(theme.text_primary);
+        assert_eq!(style.fg, Some(theme.text_primary));
+        assert_eq!(style.bg, Some(Color::Reset));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(style.sub_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn selection_overlay_uses_text_cues_when_background_is_transparent() {
+        let transparent = Theme::groknight().transparent_elevated();
+        let cursor = transparent.selection_overlay_style(transparent.bg_highlight, true);
+        assert_eq!(cursor.bg, None);
+        assert!(cursor.add_modifier.contains(Modifier::BOLD));
+        assert!(cursor.add_modifier.contains(Modifier::UNDERLINED));
+
+        let range = transparent.selection_overlay_style(transparent.bg_visual, false);
+        assert!(!range.add_modifier.contains(Modifier::BOLD));
+        assert!(range.add_modifier.contains(Modifier::UNDERLINED));
+
+        let opaque = Theme::groknight();
+        let band = opaque.selection_overlay_style(opaque.bg_highlight, true);
+        assert_eq!(band.bg, Some(opaque.bg_highlight));
+        assert!(band.add_modifier.is_empty());
+
+        let hover = transparent.hover_overlay_style(transparent.bg_hover);
+        assert_eq!(hover.bg, None);
+        assert!(hover.add_modifier.contains(Modifier::UNDERLINED));
+        let opaque_hover = opaque.hover_overlay_style(opaque.bg_hover);
+        assert_eq!(opaque_hover.bg, Some(opaque.bg_hover));
+        assert!(opaque_hover.add_modifier.is_empty());
     }
 
     #[test]
@@ -260,7 +368,7 @@ mod tests {
         assert_eq!(dark.bg_base, Color::Reset);
         assert_eq!(dark.invert_canvas(), Color::Black);
         assert_eq!(dark.invert_ink(Color::Reset), Color::Black);
-        assert_eq!(dark.invert_ink(dark.bg_dark), dark.bg_dark);
+        assert_eq!(dark.invert_ink(dark.bg_dark), Color::Black);
 
         let light = Theme::grokday().transparent_elevated();
         assert_eq!(light.invert_canvas(), Color::White);
@@ -312,8 +420,8 @@ mod tests {
             assert_eq!(see.bg_light, Color::Reset);
             assert_eq!(see.canvas, solid.canvas);
             assert_eq!(see.design_canvas(), solid.bg_base);
-            assert_eq!(see.bg_dark, solid.bg_dark);
-            assert_eq!(see.bg_hover, solid.bg_hover);
+            assert_eq!(see.bg_dark, Color::Reset);
+            assert_eq!(see.bg_hover, Color::Reset);
             assert!(see.blend_canvas(see.accent_user, 0.5).is_some());
             assert_eq!(see.invert_canvas(), Color::Black);
 
@@ -345,9 +453,8 @@ mod tests {
             // Body is always Reset under transparent mode.
             assert_eq!(see.bg_base, Color::Reset);
             assert_eq!(see.bg_light, Color::Reset);
-            // Interaction bands match the opaque Theme::current snapshot.
-            assert_eq!(see.bg_dark, solid.bg_dark);
-            assert_eq!(see.bg_hover, solid.bg_hover);
+            assert_eq!(see.bg_dark, Color::Reset);
+            assert_eq!(see.bg_hover, Color::Reset);
             assert_eq!(see.accent_user, solid.accent_user);
 
             if !matches!(solid.bg_base, Color::Reset) {

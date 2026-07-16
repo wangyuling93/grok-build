@@ -271,12 +271,13 @@ fn render_reset_confirm_overlay(
         width: content_area.width,
         height: 1,
     };
-    let prompt_bg_style = Style::default().bg(theme.bg_visual);
-    buf.set_style(prompt_area, prompt_bg_style);
     let prompt_style = Style::default()
         .fg(theme.accent_user)
-        .bg(theme.bg_visual)
         .add_modifier(Modifier::BOLD);
+    buf.set_style(
+        prompt_area,
+        theme.selection_overlay_style(theme.bg_visual, false),
+    );
     let prompt_text: std::borrow::Cow<'_, str> =
         if overlay.prompt.width() <= content_area.width as usize {
             std::borrow::Cow::Borrowed(overlay.prompt)
@@ -1098,7 +1099,13 @@ pub(super) fn render_picking_enum(
             width: area.width,
             height: layout.height,
         };
-        buf.set_style(block_rect, Style::default().bg(bg));
+        if is_focused {
+            buf.set_style(block_rect, theme.selection_overlay_style(bg, true));
+        } else if is_hovered {
+            buf.set_style(block_rect, theme.hover_overlay_style(bg));
+        } else {
+            buf.set_style(block_rect, Style::default().bg(bg));
+        }
         picker_choice_rects[choice_i] = block_rect;
 
         // ── Line 1: prefix + display + (· + first wrap line) ──────
@@ -1326,7 +1333,13 @@ fn render_picking_group(
             width: area.width,
             height: 1,
         };
-        buf.set_style(row_rect, Style::default().bg(bg));
+        if is_focused {
+            buf.set_style(row_rect, theme.selection_overlay_style(bg, true));
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay_style(bg));
+        } else {
+            buf.set_style(row_rect, Style::default().bg(bg));
+        }
         rects[i] = row_rect;
 
         let marker = if is_focused {
@@ -2415,7 +2428,7 @@ pub(super) fn render_setting_row(
     // The 1-cell right pad is baked into `restart_x`.
     let restart_x_line1 = (area.x + area.width).saturating_sub(restart_w + 1);
 
-    match layout {
+    let hit_rect = match layout {
         RowLayout::OneLine => {
             // Chevron column reserved for all rows for alignment.
             let chevron_x = restart_x_line1.saturating_sub(ROW_CHEVRON_COL_W);
@@ -2590,7 +2603,15 @@ pub(super) fn render_setting_row(
                 height: 1,
             }
         }
+    };
+
+    if is_selected {
+        buf.set_style(area, theme.selection_overlay_style(bg, true));
+    } else if is_hovered {
+        buf.set_style(area, theme.hover_overlay_style(bg));
     }
+
+    hit_rect
 }
 
 /// Render the wrapped description for an expanded row.
@@ -2659,6 +2680,9 @@ fn render_setting_row_no_value(
         &Span::styled(&text, label_style),
         w.min(area.width),
     );
+    if is_selected {
+        buf.set_style(area, theme.selection_overlay_style(bg, true));
+    }
 }
 
 /// Render a `Group` row in the Browse list: a triangle-prefixed label with a
@@ -2709,6 +2733,12 @@ fn render_setting_group_row(
             chevron_w,
         );
     }
+    if is_selected {
+        buf.set_style(area, theme.selection_overlay_style(bg, true));
+    } else if is_hovered {
+        buf.set_style(area, theme.hover_overlay_style(bg));
+    }
+
     // Hit-rect spans the chevron column (a click there opens the sub-sheet).
     Rect {
         x: chevron_x,

@@ -1330,6 +1330,11 @@ fn render_agents_tab(
         if row_y >= content_area.y + content_area.height {
             break;
         }
+        let selection_cursor = match &rows[ri] {
+            FlatRow::Agent(idx) if *idx == state.selected => Some(true),
+            FlatRow::Description(idx, _) if *idx == state.selected => Some(false),
+            _ => None,
+        };
         match &rows[ri] {
             FlatRow::ScopeHeader(scope) => {
                 let label = match scope {
@@ -1487,6 +1492,18 @@ fn render_agents_tab(
                 buf.set_string(content_area.x, row_y, &display, detail_style);
             }
         }
+        if let Some(is_cursor) = selection_cursor {
+            let row_area = Rect {
+                x: content_area.x,
+                y: row_y,
+                width: content_area.width,
+                height: 1,
+            };
+            buf.set_style(
+                row_area,
+                theme.selection_overlay_style(theme.bg_highlight, is_cursor),
+            );
+        }
     }
 }
 /// Render the Personas tab content.
@@ -1613,6 +1630,17 @@ fn render_personas_tab(
         if row_y >= content_area.y + content_area.height {
             break;
         }
+        let selection_cursor = match &rows[ri] {
+            PersonaFlatRow::Name(idx) if *idx == state.persona_selected => Some(true),
+            PersonaFlatRow::Description(idx, _)
+            | PersonaFlatRow::Tags(idx, _)
+            | PersonaFlatRow::Hint(idx, _)
+                if *idx == state.persona_selected =>
+            {
+                Some(false)
+            }
+            _ => None,
+        };
         match &rows[ri] {
             PersonaFlatRow::Name(idx) => {
                 state.row_map.push((row_y, *idx));
@@ -1752,6 +1780,18 @@ fn render_personas_tab(
                 buf.set_string(hint_x, row_y, text, hint_style);
             }
         }
+        if let Some(is_cursor) = selection_cursor {
+            let row_area = Rect {
+                x: content_area.x,
+                y: row_y,
+                width: content_area.width,
+                height: 1,
+            };
+            buf.set_style(
+                row_area,
+                theme.selection_overlay_style(theme.bg_highlight, is_cursor),
+            );
+        }
     }
 }
 /// Flat row types for the personas tab.
@@ -1812,7 +1852,7 @@ fn render_create_text_field(
         if cursor_x < content_area.x + content_area.width
             && let Some(cell) = buf.cell_mut((cursor_x, y))
         {
-            cell.set_style(Style::default().fg(theme.invert_canvas()).bg(theme.text_primary));
+            cell.set_style(theme.inverse_canvas_style(theme.text_primary));
         }
     }
     y + 2
@@ -2516,6 +2556,82 @@ pub fn handle_agents_mouse(state: &mut AgentsModalState, mouse: &MouseEvent) -> 
 mod tests {
     use super::*;
     use xai_grok_shell::agent::config::DEFAULT_AGENT_TYPE;
+
+    fn assert_transparent_selection_cue(buf: &Buffer, area: Rect, y: u16) {
+        let row: Vec<_> = (area.x..area.x + area.width)
+            .map(|x| &buf[(x, y)])
+            .collect();
+        assert!(
+            row.iter()
+                .all(|cell| cell.bg == ratatui::style::Color::Reset),
+            "transparent selection row must not paint a background: {row:?}"
+        );
+        assert!(
+            row.iter().any(|cell| {
+                cell.symbol() != " " && cell.modifier.contains(Modifier::UNDERLINED)
+            }),
+            "transparent selection row needs an underlined text cue: {row:?}"
+        );
+    }
+
+    fn assert_no_selection_cue(buf: &Buffer, area: Rect, y: u16) {
+        assert!(
+            (area.x..area.x + area.width)
+                .map(|x| &buf[(x, y)])
+                .filter(|cell| cell.symbol() != " ")
+                .all(|cell| !cell.modifier.contains(Modifier::UNDERLINED)),
+            "unselected row must not inherit the transparent selection cue"
+        );
+    }
+
+    #[test]
+    fn transparent_selected_agent_and_persona_rows_use_non_background_cues() {
+        let mut agent_state = AgentsModalState::new(
+            Path::new("/definitely-not-a-real-grok-project"),
+            &HashMap::new(),
+            &BundleState::default(),
+            None,
+            None,
+        );
+        agent_state.agents.truncate(2);
+        for agent in &mut agent_state.agents {
+            agent.description.clear();
+        }
+        let agent_area = Rect::new(0, 0, 80, 12);
+        let mut agent_buf = Buffer::empty(agent_area);
+        let theme = Theme::groknight().transparent_elevated();
+        render_agents_tab(&mut agent_buf, &agent_area, &mut agent_state, &theme);
+        let agent_y = agent_state
+            .row_map
+            .iter()
+            .find_map(|(y, idx)| (*idx == agent_state.selected).then_some(*y))
+            .expect("selected agent row rendered");
+        assert_transparent_selection_cue(&agent_buf, agent_area, agent_y);
+        let other_agent_y = agent_state
+            .row_map
+            .iter()
+            .find_map(|(y, idx)| (*idx != agent_state.selected).then_some(*y))
+            .expect("unselected agent row rendered");
+        assert_no_selection_cue(&agent_buf, agent_area, other_agent_y);
+
+        let mut persona_state = make_persona_state(three_personas(), "", 0);
+        let persona_area = Rect::new(0, 0, 80, 12);
+        let mut persona_buf = Buffer::empty(persona_area);
+        render_personas_tab(&mut persona_buf, &persona_area, &mut persona_state, &theme);
+        let persona_y = persona_state
+            .row_map
+            .iter()
+            .find_map(|(y, idx)| (*idx == persona_state.persona_selected).then_some(*y))
+            .expect("selected persona row rendered");
+        assert_transparent_selection_cue(&persona_buf, persona_area, persona_y);
+        let other_persona_y = persona_state
+            .row_map
+            .iter()
+            .find_map(|(y, idx)| (*idx != persona_state.persona_selected).then_some(*y))
+            .expect("unselected persona row rendered");
+        assert_no_selection_cue(&persona_buf, persona_area, other_persona_y);
+    }
+
     #[test]
     fn agents_tab_next_cycles() {
         assert_eq!(AgentsTab::Agents.next(), AgentsTab::Personas);

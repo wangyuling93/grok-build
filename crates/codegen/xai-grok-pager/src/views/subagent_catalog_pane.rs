@@ -17,7 +17,7 @@ use ratatui::widgets::StatefulWidget;
 use crate::app::bundle::BundleState;
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
-use crate::theme::Theme;
+use crate::theme::{Theme, cache::RenderKey};
 
 use super::list_pane::{
     ListItem, ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, WrapMode,
@@ -83,6 +83,9 @@ pub struct SubagentCatalogPane {
     entries: Vec<CatalogEntry>,
     pub list_state: ListPaneState,
     list_style: ListPaneStyle,
+    /// Theme paint identity at the last render. The selection background is
+    /// cached in `list_style`, so transparency changes must refresh it too.
+    last_render_key: RenderKey,
     pub overlay: OverlayState,
 }
 
@@ -109,6 +112,7 @@ impl SubagentCatalogPane {
             entries: Vec::new(),
             list_state,
             list_style: ListPaneStyle::default(),
+            last_render_key: Theme::render_key(),
             overlay: OverlayState::hidden(),
         }
     }
@@ -264,6 +268,12 @@ impl SubagentCatalogPane {
         focused: bool,
         layout_cfg: &LayoutConfig,
     ) {
+        let render_key = Theme::render_key();
+        if render_key != self.last_render_key {
+            self.last_render_key = render_key;
+            self.list_style = ListPaneStyle::default();
+        }
+
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
             if inner.height > 0 && inner.width > 0 {

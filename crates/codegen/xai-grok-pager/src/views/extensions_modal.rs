@@ -3873,7 +3873,7 @@ fn render_input_form(buf: &mut Buffer, area: Rect, input: &ModalInput, theme: &T
                 buf.set_string(text_x, content_y, &display, placeholder_style);
             }
             if is_focused && let Some(cell) = buf.cell_mut((text_x, content_y)) {
-                cell.set_style(Style::default().fg(theme.invert_canvas()).bg(theme.text_primary));
+                cell.set_style(theme.inverse_canvas_style(theme.text_primary));
             }
         } else {
             let viewport = field.viewport(max_text_w);
@@ -3885,7 +3885,7 @@ fn render_input_form(buf: &mut Buffer, area: Rect, input: &ModalInput, theme: &T
                 if cx < inner.x + inner.width
                     && let Some(cell) = buf.cell_mut((cx, content_y))
                 {
-                    cell.set_style(Style::default().fg(theme.invert_canvas()).bg(theme.text_primary));
+                    cell.set_style(theme.inverse_canvas_style(theme.text_primary));
                 }
             }
         }

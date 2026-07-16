@@ -4,7 +4,6 @@ use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
-    set_transparent_background, set_transparent_background_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
@@ -12,8 +11,9 @@ use super::setters::{
     set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
     set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
-    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
-    set_voice_capture_mode_inner, set_voice_stt_language_inner,
+    set_timeline_inner, set_timestamps, set_timestamps_inner, set_transparent_background,
+    set_transparent_background_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
+    set_voice_stt_language_inner, transparency_change_blocked,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -93,6 +93,37 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
             };
         }
     }
+}
+
+/// Apply a failed-save rollback once every task is idle. Called immediately
+/// before drawing so the first post-task frame uses the persisted paint mode.
+pub(crate) fn apply_deferred_transparency_rollback(app: &mut AppView) {
+    let Some(pending) = app.pending_transparency_rollback else {
+        return;
+    };
+    if pending.generation != app.transparency_persist_generation {
+        app.pending_transparency_rollback = None;
+        tracing::debug!(
+            target: "settings",
+            generation = pending.generation,
+            latest_generation = app.transparency_persist_generation,
+            "discarded stale deferred transparency rollback"
+        );
+        return;
+    }
+    if transparency_change_blocked(app) {
+        return;
+    }
+
+    app.pending_transparency_rollback = None;
+    set_transparent_background_inner(app, pending.value);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        value = pending.value,
+        generation = pending.generation,
+        "applied deferred transparency persistence rollback"
+    );
 }
 
 /// Open the command palette (the `/help` slash command path). Mirrors the
@@ -424,7 +455,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_compact_mode(app: &mut AppView) 
 pub(in crate::app::dispatch) fn dispatch_toggle_transparent_background(
     app: &mut AppView,
 ) -> Vec<Effect> {
-    let new = !app.current_ui.transparent_background;
+    let new = !app.current_ui.transparent_background.unwrap_or(false);
     set_transparent_background(app, new)
 }
 
@@ -889,7 +920,21 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         (crate::settings::defs::TRANSPARENT_BACKGROUND_KEY, SettingValue::Bool(b)) => {
-            set_transparent_background_inner(app, *b)
+            if transparency_change_blocked(app) {
+                app.pending_transparency_rollback =
+                    Some(crate::app::app_view::PendingTransparencyRollback {
+                        value: *b,
+                        generation: app.transparency_persist_generation,
+                    });
+                tracing::warn!(
+                    target: "settings",
+                    "transparency persistence failed while a task was running; \
+                     deferring rollback until work is idle"
+                );
+            } else {
+                app.pending_transparency_rollback = None;
+                set_transparent_background_inner(app, *b)
+            }
         }
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),

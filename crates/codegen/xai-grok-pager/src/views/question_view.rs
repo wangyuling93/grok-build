@@ -45,6 +45,14 @@ fn hovered_bg(theme: &Theme) -> ratatui::style::Color {
     theme.bg_hover
 }
 
+fn apply_hover_overlay(line: &mut Line<'_>, theme: &Theme, background: ratatui::style::Color) {
+    let overlay = theme.hover_overlay_style(background);
+    line.style = line.style.patch(overlay);
+    for span in &mut line.spans {
+        span.style = span.style.patch(overlay);
+    }
+}
+
 // ── Enums ──────────────────────────────────────────────────────────────
 
 /// Per-question selection state.
@@ -1234,6 +1242,7 @@ pub fn build_flat_option_lines(
             None => theme.bg_light,
         };
 
+        let first_line = all_lines.len();
         build_single_option_lines(
             &mut all_lines,
             i,
@@ -1248,6 +1257,11 @@ pub fn build_flat_option_lines(
             theme,
             is_cursor_item,
         );
+        if is_hovered_item && embed.is_none() {
+            for line in &mut all_lines[first_line..] {
+                apply_hover_overlay(line, theme, row_bg);
+            }
+        }
     }
 
     // Freeform row — hidden in InputMode (prompt widget below replaces it).
@@ -1568,7 +1582,11 @@ fn build_freeform_line(
     }
     spans.push(Span::styled(label, label_style));
 
-    Line::from(spans).style(Style::default().bg(row_bg))
+    let mut line = Line::from(spans).style(Style::default().bg(row_bg));
+    if is_hovered && embed.is_none() {
+        apply_hover_overlay(&mut line, theme, row_bg);
+    }
+    line
 }
 
 /// Render the complete question view into the given area.

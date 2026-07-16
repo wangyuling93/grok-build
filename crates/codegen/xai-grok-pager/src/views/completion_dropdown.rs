@@ -122,6 +122,9 @@ pub fn render_dropdown(
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
         buf.set_line_safe(area.x, y, &line, row_w as u16);
+        if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay_style(row_bg));
+        }
     }
 
     if needs_scrollbar {

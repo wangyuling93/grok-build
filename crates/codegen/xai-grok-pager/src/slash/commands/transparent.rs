@@ -1,9 +1,8 @@
 //! `/transparent` (aliases `/transparent-bg`, `/transparency`) — toggle
 //! transparent TUI background.
 //!
-//! When on, body canvas and passive elevated surfaces use the host terminal
-//! background so translucent terminals (Ghostty, etc.) show through.
-//! Interaction highlights stay solid. Persists as
+//! When on, every TUI cell uses the host terminal background so translucent
+//! terminals (Ghostty, etc.) show through. Persists as
 //! `[ui].transparent_background` in config.toml.
 
 use crate::app::actions::Action;
