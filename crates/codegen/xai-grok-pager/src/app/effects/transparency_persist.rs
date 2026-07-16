@@ -8,6 +8,7 @@
 //! drain without claiming a disk write. AppView ignores stale generations.
 //! Failed writes roll back to the last value known to be on disk.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -28,6 +29,10 @@ struct Shared {
     desired: Option<Desired>,
     /// Highest generation ever registered, retained after `desired` clears so
     /// a delayed older request can never become current again.
+    ///
+    /// Generations come from [`allocate_transparency_persist_generation`] so
+    /// they stay monotonic process-wide across `AppView` rebuilds (which reset
+    /// the in-memory "current" pointer but must not restart the sequence).
     latest_generation: Option<u64>,
 }
 
@@ -38,6 +43,22 @@ static SHARED: LazyLock<StdMutex<Shared>> = LazyLock::new(|| {
         latest_generation: None,
     })
 });
+
+/// Process-wide generation allocator for transparency persist requests.
+///
+/// Must not restart at 0 when a new `AppView` is constructed: the persistence
+/// watermark (`latest_generation`) is also process-wide, and a per-view counter
+/// would make early toggles in a rebuilt view look stale and never write.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate the next transparency persist generation (process-wide, monotonic).
+///
+/// Call from the AppView dispatch path when accepting a toggle; store the
+/// result on `AppView::transparency_persist_generation` and pass it into the
+/// persist effect.
+pub(crate) fn allocate_transparency_persist_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Serializes transparency disk writes so concurrent JoinSet tasks coalesce
 /// onto the latest desired value instead of racing.
@@ -201,6 +222,9 @@ pub(crate) async fn flush_transparency_persistence() {
 
 #[cfg(test)]
 pub(crate) fn reset_transparency_persist_state_for_test() {
+    // Do not rewind NEXT_GENERATION here. Dispatch tests allocate from it
+    // without this module's TEST_LOCK, so a store would violate monotonicity
+    // process-wide and make concurrent tests order-dependent.
     let mut shared = lock_shared();
     shared.confirmed = None;
     shared.desired = None;
@@ -371,6 +395,83 @@ mod tests {
             vec![true],
             "clearing desired must not clear the generation high-water mark"
         );
+
+        reset_transparency_persist_state_for_test();
+    }
+
+    /// AppView rebuilds zero their stored generation pointer. Generations must
+    /// still be allocated process-wide so early toggles in a new view are not
+    /// rejected by a watermark left by the previous view.
+    #[tokio::test]
+    async fn allocated_generations_write_after_prior_view_watermark() {
+        let _test = lock_test_state().await;
+        reset_transparency_persist_state_for_test();
+        let written = Arc::new(StdMutex::new(Vec::new()));
+        {
+            let written = Arc::clone(&written);
+            test_hooks::set_intercept(move |value| {
+                written.lock().unwrap().push(value);
+                Ok(())
+            });
+        }
+
+        // First "AppView": several toggles raise the process-wide watermark.
+        // Other tests may allocate concurrently, so only assert relative
+        // ordering instead of assuming this process-wide allocator starts at 1
+        // or advances without gaps.
+        let mut prior_view_watermark = None;
+        for _ in 0..3 {
+            let epoch = allocate_transparency_persist_generation();
+            if let Some(previous) = prior_view_watermark {
+                assert!(epoch > previous);
+            }
+            let result = TransparencyPersist::register(true, false, epoch)
+                .run()
+                .await;
+            assert!(matches!(
+                result,
+                TaskResult::TransparentBackgroundPersisted { generation, .. }
+                    if generation == epoch
+            ));
+            prior_view_watermark = Some(epoch);
+        }
+        assert_eq!(written.lock().unwrap().len(), 3);
+
+        // Second "AppView" would start with transparency_persist_generation = 0.
+        // A per-view wrapping_add would reissue 1 and get Coalesced without a
+        // write (UI success, disk never updates). Process-wide allocation
+        // continues past the watermark instead.
+        let prior_view_watermark = prior_view_watermark.expect("first view allocated generations");
+        let epoch = allocate_transparency_persist_generation();
+        assert!(
+            epoch > prior_view_watermark,
+            "allocator must not restart with a new AppView"
+        );
+        let result = TransparencyPersist::register(false, true, epoch)
+            .run()
+            .await;
+        assert!(matches!(
+            result,
+            TaskResult::TransparentBackgroundPersisted {
+                value: false,
+                generation,
+            } if generation == epoch
+        ));
+        assert_eq!(
+            *written.lock().unwrap(),
+            vec![true, true, true, false],
+            "post-rebuild toggle must still reach disk"
+        );
+
+        // A restarted per-view sequence is still correctly rejected as stale.
+        let stale = TransparencyPersist::register(true, false, prior_view_watermark)
+            .run()
+            .await;
+        assert!(matches!(
+            stale,
+            TaskResult::TransparentBackgroundPersistCoalesced { generation }
+                if generation == prior_view_watermark
+        ));
 
         reset_transparency_persist_state_for_test();
     }

@@ -615,8 +615,11 @@ pub struct AppView {
     /// startup; updated synchronously by `set_X_inner` so dispatch
     /// stays sans-IO.
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
-    /// Latest accepted transparency persistence request. Async completions
-    /// from older generations are ignored.
+    /// Latest accepted transparency persist generation for this view.
+    /// Allocated process-wide (see `allocate_transparency_persist_generation`)
+    /// so it stays ordered against the process-wide disk-write watermark
+    /// across AppView rebuilds. Async completions from older generations are
+    /// ignored. `0` means no toggle has been accepted in this view yet.
     pub(crate) transparency_persist_generation: u64,
     /// Persistence rollback deferred until every foreground/background task is
     /// idle, so terminal paint mode never changes underneath running output.

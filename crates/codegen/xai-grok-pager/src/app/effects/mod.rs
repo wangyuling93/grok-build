@@ -17,7 +17,9 @@ pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
     persist_setting, sanitize_user_error,
 };
-pub(crate) use transparency_persist::flush_transparency_persistence;
+pub(crate) use transparency_persist::{
+    allocate_transparency_persist_generation, flush_transparency_persistence,
+};
 use helpers::*;
 use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;

@@ -897,8 +897,11 @@ pub(in crate::app::dispatch) fn set_transparent_background(
         app.show_toast("Cannot change transparency while a stream or task is active");
         return vec![];
     }
-    app.transparency_persist_generation = app.transparency_persist_generation.wrapping_add(1);
-    let generation = app.transparency_persist_generation;
+    // Process-wide allocator: AppView rebuilds reset the stored "current" gen
+    // to 0, but the persistence watermark is process-wide and must not see
+    // a restarted 1,2,3… sequence as stale.
+    let generation = crate::app::effects::allocate_transparency_persist_generation();
+    app.transparency_persist_generation = generation;
     // Any rollback from an older accepted choice is superseded immediately;
     // its eventual task completion is also rejected by the generation gate.
     app.pending_transparency_rollback = None;
