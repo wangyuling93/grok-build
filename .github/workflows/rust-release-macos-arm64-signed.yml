@@ -1,0 +1,458 @@
+# Fork-local Apple Silicon release: a signed, notarized, and stapled DMG
+# containing the Grok Build terminal executable as `grok`.
+#
+# Configure the protected `codesigning` GitHub environment first with:
+#   .github/scripts/setup-macos-signing-secrets.sh
+#
+# Environment secrets:
+#   APPLE_DEVELOPER_ID_P12
+#   APPLE_DEVELOPER_ID_P12_PASSWORD
+#   APPLE_APP_SPECIFIC_PASSWORD
+# Environment variables:
+#   APPLE_ID
+#   APPLE_TEAM_ID
+#
+# By default this workflow only uploads an Actions artifact. Enable
+# `publish_github_release` to reserve a tag and publish the DMG as a prerelease.
+
+name: rust-release-macos-arm64-signed
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_github_release:
+        description: Create a GitHub prerelease and attach the signed DMG
+        required: false
+        type: boolean
+        default: false
+      tag:
+        description: >-
+          Optional release tag. Leave empty to use
+          grok-macos-arm64-v{Cargo.toml version}.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag || 'auto' }}
+  cancel-in-progress: false
+
+jobs:
+  reserve-release-tag:
+    if: ${{ inputs.publish_github_release }}
+    name: Reserve release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve and reserve release tag
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_PREFIX: grok-macos-arm64-v
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path("crates/codegen/xai-grok-pager-bin/Cargo.toml").read_text()
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', manifest)
+          if match is None:
+              raise SystemExit("could not find the xai-grok-pager-bin version")
+          print(match.group(1))
+          PY
+          )"
+
+          default_tag="${TAG_PREFIX}${cargo_version}"
+          release_tag="${INPUT_TAG:-${default_tag}}"
+          if [[ "$release_tag" != "$default_tag" ]]; then
+            suffix="${release_tag#"$default_tag"}"
+            if [[ "$release_tag" != "$default_tag"* || ! "$suffix" =~ ^[-+][0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+              echo "Tag must be '${default_tag}' or start with '${default_tag}-'/'${default_tag}+'." >&2
+              exit 1
+            fi
+          fi
+
+          existing_sha="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${release_tag}" \
+              --jq ".[] | select(.ref == \"refs/tags/${release_tag}\") | .object.sha"
+          )"
+          if [[ -n "$existing_sha" ]]; then
+            if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
+              echo "Tag '${release_tag}' already points to ${existing_sha}, not ${GITHUB_SHA}." >&2
+              echo "Choose a unique tag for this build." >&2
+              exit 1
+            fi
+            echo "Tag '${release_tag}' already reserves this commit; continuing retry."
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${release_tag}" \
+              -f sha="$GITHUB_SHA" \
+              >/dev/null
+            echo "Reserved tag '${release_tag}' at ${GITHUB_SHA}."
+          fi
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "release_version=${cargo_version}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Grok for Apple Silicon
+    runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      TARGET: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install DotSlash
+        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deps-
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            --release \
+            --target "$TARGET" \
+            --package xai-grok-pager-bin \
+            --features release-dist
+
+      - name: Prepare unsigned Grok binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_path="target/${TARGET}/release/xai-grok-pager"
+          output_path="dist/unsigned/grok"
+
+          test -f "$source_path"
+          mkdir -p "$(dirname "$output_path")"
+          cp "$source_path" "$output_path"
+          chmod 0755 "$output_path"
+          strip -S -x "$output_path"
+
+          lipo "$output_path" -verify_arch arm64
+          file "$output_path"
+
+      - name: Upload unsigned binary for signing
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: grok-macos-arm64-unsigned
+          path: dist/unsigned/grok
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-and-package:
+    needs: build
+    name: Sign, notarize, and staple DMG
+    runs-on: macos-26
+    timeout-minutes: 180
+    environment:
+      name: codesigning
+      deployment: false
+    permissions:
+      contents: read
+    env:
+      BINARY_PATH: dist/unsigned/grok
+      DMG_PATH: dist/release-assets/grok-aarch64-apple-darwin.dmg
+
+    steps:
+      - name: Download unsigned Grok binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: grok-macos-arm64-unsigned
+          path: dist/unsigned
+
+      - name: Import Developer ID certificate and notarization credentials
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
+          : "${APPLE_DEVELOPER_ID_P12:?Missing codesigning secret APPLE_DEVELOPER_ID_P12}"
+          : "${APPLE_DEVELOPER_ID_P12_PASSWORD:?Missing codesigning secret APPLE_DEVELOPER_ID_P12_PASSWORD}"
+          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
+          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
+
+          certificate_path="${RUNNER_TEMP}/developer-id-application.p12"
+          keychain_path="${RUNNER_TEMP}/grok-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          notary_profile="grok-notary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "::add-mask::${keychain_password}"
+          echo "SIGNING_KEYCHAIN_PATH=${keychain_path}" >> "$GITHUB_ENV"
+
+          umask 077
+          printf '%s' "$APPLE_DEVELOPER_ID_P12" | base64 --decode > "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          signing_identity="$({
+            security find-identity -v -p codesigning "$keychain_path" || true
+          } | awk '/Developer ID Application:/ { print $2; exit }')"
+          if [[ -z "$signing_identity" ]]; then
+            echo "No Developer ID Application identity was imported." >&2
+            security find-identity -v -p codesigning "$keychain_path" || true
+            exit 1
+          fi
+
+          xcrun notarytool store-credentials "$notary_profile" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$keychain_path" \
+            --validate
+
+          {
+            echo "NOTARY_PROFILE=${notary_profile}"
+            echo "SIGNING_IDENTITY=${signing_identity}"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign Grok binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 0755 "$BINARY_PATH"
+          codesign \
+            --force \
+            --sign "$SIGNING_IDENTITY" \
+            --keychain "$SIGNING_KEYCHAIN_PATH" \
+            --options runtime \
+            --timestamp \
+            --identifier ai.x.grok \
+            "$BINARY_PATH"
+
+          lipo "$BINARY_PATH" -verify_arch arm64
+          codesign --verify --strict --verbose=2 "$BINARY_PATH"
+          codesign --display --verbose=4 "$BINARY_PATH"
+
+      - name: Create and sign DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_root="${RUNNER_TEMP}/grok-dmg-root"
+
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root" "$(dirname "$DMG_PATH")"
+          ditto "$BINARY_PATH" "${dmg_root}/grok"
+          rm -f "$DMG_PATH"
+
+          hdiutil create \
+            -volname "Grok" \
+            -srcfolder "$dmg_root" \
+            -format UDZO \
+            -ov \
+            "$DMG_PATH"
+
+          codesign \
+            --force \
+            --sign "$SIGNING_IDENTITY" \
+            --keychain "$SIGNING_KEYCHAIN_PATH" \
+            --timestamp \
+            "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+
+      - name: Notarize and staple DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="macos-notarization/aarch64-apple-darwin"
+          report_path="${report_dir}/dmg-notarytool-submit.json"
+          mkdir -p "$report_dir"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --keychain-profile "$NOTARY_PROFILE" \
+            --keychain "$SIGNING_KEYCHAIN_PATH" \
+            --wait \
+            --timeout 45m \
+            --output-format json \
+            | tee "$report_path"
+
+          python3 - "$report_path" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          if report.get("status") != "Accepted":
+              raise SystemExit(f"Notarization was not accepted: {report}")
+          PY
+
+          xcrun stapler staple -v "$DMG_PATH"
+          xcrun stapler validate -v "$DMG_PATH"
+          shasum -a 256 "$DMG_PATH" > "${report_dir}/dmg-sha256.txt"
+
+      - name: Verify signed DMG contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount_dir="${RUNNER_TEMP}/grok-dmg-mount"
+
+          hdiutil verify "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          xcrun stapler validate -v "$DMG_PATH"
+
+          rm -rf "$mount_dir"
+          mkdir -p "$mount_dir"
+          hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$mount_dir"
+          cleanup_mount() {
+            diskutil eject "$mount_dir" >/dev/null
+          }
+          trap cleanup_mount EXIT
+
+          test -f "${mount_dir}/grok"
+          test "$(find "$mount_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "1"
+          lipo "${mount_dir}/grok" -verify_arch arm64
+          codesign --verify --strict --verbose=2 "${mount_dir}/grok"
+
+          cleanup_mount
+          trap - EXIT
+          ls -lah "$(dirname "$DMG_PATH")"
+
+      - name: Upload signed DMG
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: grok-macos-arm64-signed
+          path: dist/release-assets/grok-aarch64-apple-darwin.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload notarization report
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: grok-macos-arm64-notarization
+          path: macos-notarization/aarch64-apple-darwin/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Delete temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          fi
+          rm -f "${RUNNER_TEMP}/developer-id-application.p12"
+
+  publish:
+    if: ${{ inputs.publish_github_release }}
+    needs:
+      - reserve-release-tag
+      - sign-and-package
+    name: Publish GitHub prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download signed DMG
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: grok-macos-arm64-signed
+          path: release-assets
+
+      - name: Verify release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="release-assets/grok-aarch64-apple-darwin.dmg"
+          test -f "$dmg"
+          test "$(find release-assets -type f | wc -l | tr -d ' ')" = "1"
+          ls -lah release-assets
+
+      - name: Write release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Signed, notarized, and stapled Apple Silicon build of Grok Build."
+            echo
+            echo 'Asset: `grok-aarch64-apple-darwin.dmg`'
+            echo
+            echo 'The DMG contains one executable: `grok`.'
+            echo
+            echo "Built from \`${GITHUB_SHA}\`."
+          } > "$notes_path"
+          echo "path=${notes_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub prerelease
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ needs.reserve-release-tag.outputs.release_version }} (macOS arm64)
+          tag_name: ${{ needs.reserve-release-tag.outputs.release_tag }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: release-assets/grok-aarch64-apple-darwin.dmg
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: false
+          prerelease: true
