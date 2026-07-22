@@ -169,12 +169,14 @@ pub enum TaskEntryId {
     BgTask(String),
     Agent(String),
     Scheduled(String),
+    Workflow(String),
 }
 
 /// Logical group a [`TaskEntry`] belongs to. Drives both the sort order (so
 /// each kind is contiguous) and the collapsible group headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GroupKind {
+    Workflows,
     Subagents,
     Tasks,
     /// Recurring background processes: `monitor` tasks and `/loop` scheduled
@@ -183,22 +185,25 @@ pub enum GroupKind {
     Watchers,
 }
 
+const GROUP_KIND_COUNT: usize = 4;
+
 impl GroupKind {
     /// Display label shown in the group header.
     fn label(self) -> &'static str {
         match self {
+            GroupKind::Workflows => "Workflows",
             GroupKind::Subagents => "Subagents",
             GroupKind::Tasks => "Tasks",
             GroupKind::Watchers => "Watchers",
         }
     }
 
-    /// Sort/render order: subagents → tasks → watchers (monitors + loops).
     fn order(self) -> u8 {
         match self {
-            GroupKind::Subagents => 0,
-            GroupKind::Tasks => 1,
-            GroupKind::Watchers => 2,
+            GroupKind::Workflows => 0,
+            GroupKind::Subagents => 1,
+            GroupKind::Tasks => 2,
+            GroupKind::Watchers => 3,
         }
     }
 }
@@ -239,6 +244,15 @@ pub enum TaskEntry {
         styled: Line<'static>,
         started_at: Instant,
         linked_subagent: Option<String>,
+    },
+    Workflow {
+        id: u64,
+        name: String,
+        label: String,
+        styled: Line<'static>,
+        running: bool,
+        stoppable: bool,
+        started_at: Instant,
     },
     /// Collapsible group header row (e.g. `▾ Subagents 2`). Not a task —
     /// selecting it and pressing Enter (or clicking it) toggles the group's
@@ -446,6 +460,82 @@ impl TaskEntry {
         }
     }
 
+    fn from_workflow_run(run: &crate::views::workflows::WorkflowRunSnapshot) -> Self {
+        let theme = Theme::current();
+        let running = run.is_active();
+
+        let raw_tag_color = if running {
+            theme.accent_running
+        } else if run.status == "complete" {
+            theme.accent_success
+        } else if run.is_terminal() {
+            theme.accent_error
+        } else {
+            theme.warning
+        };
+        let tag_color = if running {
+            raw_tag_color
+        } else {
+            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
+                .unwrap_or(raw_tag_color)
+        };
+        let name_style = if running {
+            Style::default().fg(theme.text_primary)
+        } else {
+            Style::default().fg(theme.gray_bright)
+        };
+
+        let suffix = if running {
+            let phase = run
+                .current_phase
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
+            let agents = match run.agents.iter().filter(|a| a.state == "running").count() {
+                0 => None,
+                1 => Some("1 agent".to_string()),
+                n => Some(format!("{n} agents")),
+            };
+            match (phase, agents) {
+                (Some(p), Some(a)) => format!("{p} · {a}"),
+                (Some(p), None) => p.to_string(),
+                (None, Some(a)) => a,
+                (None, None) => "running".to_string(),
+            }
+        } else {
+            run.status.replace('_', " ")
+        };
+
+        let mut spans = vec![
+            Span::styled("Workflow ".to_string(), Style::default().fg(tag_color)),
+            Span::styled(run.name.clone(), name_style),
+        ];
+        if !suffix.is_empty() {
+            spans.push(Span::styled(
+                format!(" \u{2014} {suffix}"),
+                Style::default().fg(theme.gray),
+            ));
+        }
+
+        let label = format!("Workflow {} {suffix}", run.name);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "workflow:".hash(&mut hasher);
+        run.run_id.hash(&mut hasher);
+        let id = hasher.finish();
+
+        TaskEntry::Workflow {
+            id,
+            name: run.name.clone(),
+            label,
+            styled: Line::from(spans),
+            running,
+            stoppable: run.can_stop(),
+            started_at: Instant::now()
+                .checked_sub(std::time::Duration::from_millis(run.live_elapsed_ms()))
+                .unwrap_or_else(Instant::now),
+        }
+    }
+
     fn from_scheduled(
         info: &ScheduledTaskInfo,
         current_cron: Option<&str>,
@@ -576,13 +666,16 @@ impl TaskEntry {
                 is_monitor: true, ..
             } => GroupKind::Watchers,
             TaskEntry::Scheduled { .. } => GroupKind::Watchers,
+            TaskEntry::Workflow { .. } => GroupKind::Workflows,
             TaskEntry::Header { group, .. } => *group,
         }
     }
 
     fn is_running(&self) -> bool {
         match self {
-            TaskEntry::BgTask { running, .. } | TaskEntry::Agent { running, .. } => *running,
+            TaskEntry::BgTask { running, .. }
+            | TaskEntry::Agent { running, .. }
+            | TaskEntry::Workflow { running, .. } => *running,
             TaskEntry::Scheduled { .. } => true,
             TaskEntry::Header { .. } => false,
         }
@@ -595,14 +688,15 @@ impl TaskEntry {
     /// loops within that section.
     fn type_order(&self) -> u8 {
         match self {
-            TaskEntry::Agent { .. } => 0,
+            TaskEntry::Workflow { .. } => 0,
+            TaskEntry::Agent { .. } => 1,
             TaskEntry::BgTask {
                 is_monitor: false, ..
-            } => 1,
+            } => 2,
             TaskEntry::BgTask {
                 is_monitor: true, ..
-            } => 2,
-            TaskEntry::Scheduled { .. } => 3,
+            } => 3,
+            TaskEntry::Scheduled { .. } => 4,
             // Headers never appear in the sorted `items` list; fall back to
             // the group's coarse order for completeness.
             TaskEntry::Header { group, .. } => group.order(),
@@ -616,6 +710,7 @@ impl ListItem for TaskEntry {
             TaskEntry::BgTask { styled, .. }
             | TaskEntry::Agent { styled, .. }
             | TaskEntry::Scheduled { styled, .. }
+            | TaskEntry::Workflow { styled, .. }
             | TaskEntry::Header { styled, .. } => styled,
         }
     }
@@ -633,7 +728,8 @@ impl ListItem for TaskEntry {
         match self {
             TaskEntry::BgTask { id, .. }
             | TaskEntry::Agent { id, .. }
-            | TaskEntry::Scheduled { id, .. } => *id,
+            | TaskEntry::Scheduled { id, .. }
+            | TaskEntry::Workflow { id, .. } => *id,
             TaskEntry::Header { group, .. } => {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 "header:".hash(&mut hasher);
@@ -651,7 +747,8 @@ impl ListItem for TaskEntry {
         match self {
             TaskEntry::BgTask { label, .. }
             | TaskEntry::Agent { label, .. }
-            | TaskEntry::Scheduled { label, .. } => label,
+            | TaskEntry::Scheduled { label, .. }
+            | TaskEntry::Workflow { label, .. } => label,
             TaskEntry::Header { group, .. } => group.label(),
         }
     }
@@ -666,6 +763,7 @@ enum OverlayEntryData {
     BgTask(String),
     Agent(String, String),
     Scheduled(String, Option<String>),
+    Workflow(String),
 }
 
 const MAX_TASKS_HEIGHT: u16 = 8;
@@ -695,6 +793,7 @@ pub struct TasksPane {
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
     /// Invalidates syntax/highlight caches when theme or paint mode changes.
     highlight_cache_key: RenderKey,
+    workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
 }
 
 impl Default for TasksPane {
@@ -796,12 +895,12 @@ impl TasksPane {
             opened_by_auto: false,
             highlight_cache: HashMap::new(),
             highlight_cache_key: Theme::render_key(),
+            workflow_runs: Vec::new(),
         }
     }
 
     // -- Data sync -----------------------------------------------------------
 
-    /// Sync entries from bg tasks, subagent sessions, and scheduled tasks.
     pub fn sync(
         &mut self,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
@@ -809,6 +908,7 @@ impl TasksPane {
         scheduled: &HashMap<String, ScheduledTaskInfo>,
         current_cron_task_id: Option<&str>,
         queued_cron_ids: &std::collections::HashSet<&str>,
+        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
     ) {
         // Rebuild list chrome from the current theme each sync, and drop
         // highlight spans when the paint identity changes.
@@ -832,8 +932,10 @@ impl TasksPane {
             }
         }
 
-        // Add subagent items
         for info in subagents.values() {
+            if info.workflow_run_id.is_some() {
+                continue;
+            }
             if self.show_done || info.is_running() {
                 self.items.push(TaskEntry::from_subagent(info));
             }
@@ -853,6 +955,13 @@ impl TasksPane {
                 queued_cron_ids.contains(info.task_id.as_str()),
                 linked,
             ));
+        }
+
+        self.workflow_runs = workflow_runs.to_vec();
+        for run in workflow_runs {
+            if self.show_done || !run.is_terminal() {
+                self.items.push(TaskEntry::from_workflow_run(run));
+            }
         }
 
         // Sort: group by type first (subagents → tasks → monitors →
@@ -892,6 +1001,10 @@ impl TasksPane {
                         TaskEntry::BgTask { start_time: a, .. },
                         TaskEntry::BgTask { start_time: b, .. },
                     ) => b.cmp(a),
+                    (
+                        TaskEntry::Workflow { started_at: a, .. },
+                        TaskEntry::Workflow { started_at: b, .. },
+                    ) => b.cmp(a),
                     _ => std::cmp::Ordering::Equal,
                 })
                 // 4. Stable tiebreak so equal-timestamp rows don't reshuffle
@@ -904,7 +1017,7 @@ impl TasksPane {
         // after the group emptied) the group reappears expanded instead of
         // hidden under a stale collapsed header.
         if !self.collapsed_groups.is_empty() {
-            let mut present = [false; 3];
+            let mut present = [false; GROUP_KIND_COUNT];
             for it in &self.items {
                 present[it.group_kind().order() as usize] = true;
             }
@@ -924,8 +1037,12 @@ impl TasksPane {
             .values()
             .filter(|t| t.status == BgTaskStatus::Running && !t.restored_from_replay)
             .count()
-            + subagents.values().filter(|s| s.is_running()).count()
-            + scheduled.len();
+            + subagents
+                .values()
+                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
+                .count()
+            + scheduled.len()
+            + workflow_runs.iter().filter(|run| run.is_active()).count();
 
         // Auto-show: running went from 0 to N
         if running_count > 0 && self.prev_running_count == 0 {
@@ -955,7 +1072,7 @@ impl TasksPane {
     fn rebuild_entries(&mut self) {
         self.entries.clear();
         // Per-group item counts (indexed by `GroupKind::order`).
-        let mut counts: [usize; 3] = [0; 3];
+        let mut counts: [usize; GROUP_KIND_COUNT] = [0; GROUP_KIND_COUNT];
         for it in &self.items {
             counts[it.group_kind().order() as usize] += 1;
         }
@@ -995,10 +1112,11 @@ impl TasksPane {
         };
         if changed {
             self.rebuild_entries();
-            if let Some(header) = self.entries.iter().find(|e| {
-                matches!(e, TaskEntry::Header { group: g, .. }
-if *g == group)
-            }) {
+            if let Some(header) = self
+                .entries
+                .iter()
+                .find(|e| matches!(e, TaskEntry::Header { group: g, .. } if *g == group))
+            {
                 let id = header.stable_id();
                 self.list_state.select_by_id(id);
             }
@@ -1014,19 +1132,23 @@ if *g == group)
         }
     }
 
-    /// Number of running bg tasks + subagents + scheduled tasks.
     pub fn running_count(
         &self,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
+        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
     ) -> usize {
         bg_tasks
             .values()
             .filter(|t| t.status == BgTaskStatus::Running)
             .count()
-            + subagents.values().filter(|s| s.is_running()).count()
+            + subagents
+                .values()
+                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
+                .count()
             + scheduled.len()
+            + workflow_runs.iter().filter(|run| run.is_active()).count()
     }
 
     // -- Visibility ----------------------------------------------------------
@@ -1325,6 +1447,7 @@ if *g == group)
                         linked_subagent,
                         ..
                     } => OverlayEntryData::Scheduled(task_id.clone(), linked_subagent.clone()),
+                    TaskEntry::Workflow { name, .. } => OverlayEntryData::Workflow(name.clone()),
                     // Group headers have no kill/view buttons; they still
                     // occupy a row (vis_row is enumerated before this filter),
                     // so the y offsets for following items stay correct.
@@ -1358,8 +1481,84 @@ if *g == group)
                         &theme,
                     );
                 }
+                OverlayEntryData::Workflow(ref name) => {
+                    let Some(run) = self.workflow_runs.iter().find(|r| r.name == *name).cloned()
+                    else {
+                        continue;
+                    };
+                    self.render_workflow_overlay(area, buf, y, &run, &theme);
+                }
             }
         }
+    }
+
+    fn render_workflow_overlay(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        y: u16,
+        run: &crate::views::workflows::WorkflowRunSnapshot,
+        theme: &Theme,
+    ) {
+        let running = run.is_active();
+        let elapsed = format_duration(std::time::Duration::from_millis(run.live_elapsed_ms()));
+        let (icon, icon_style) = if running {
+            let frames = crate::glyphs::dot_spinner_frames();
+            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
+            (frames[frame_idx], Style::default().fg(theme.accent_running))
+        } else if run.status == "complete" {
+            (
+                crate::glyphs::check_mark(),
+                Style::default().fg(theme.accent_success),
+            )
+        } else if run.is_terminal() {
+            (
+                crate::glyphs::ballot_x(),
+                Style::default().fg(theme.accent_error),
+            )
+        } else {
+            ("⏸", Style::default().fg(theme.warning))
+        };
+        let right_text = format!("{elapsed} ");
+
+        buf.set_span(area.x, y, &Span::styled(icon, icon_style), 2);
+
+        let right_text_w = right_text.width() as u16;
+        let kill_w: u16 = if running { 3 } else { 0 };
+        let overlay_w = kill_w + right_text_w + 1;
+        clear_overlay_area(buf, area, y, overlay_w);
+
+        let mut rx = area.x + area.width;
+        if running {
+            rx = rx.saturating_sub(3);
+            let is_hovered = matches!(
+                &self.hovered_kill,
+                Some(TaskEntryId::Workflow(n)) if n == &run.name
+            );
+            let kill_style = if is_hovered {
+                Style::default().fg(theme.accent_error)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span(
+                rx,
+                y,
+                &Span::styled(crate::glyphs::ballot_x_button(), kill_style),
+                3,
+            );
+            self.kill_button_rects.push((
+                TaskEntryId::Workflow(run.name.clone()),
+                Rect::new(rx, y, 3, 1),
+            ));
+        }
+
+        rx = rx.saturating_sub(right_text_w);
+        buf.set_span(
+            rx,
+            y,
+            &Span::styled(right_text, Style::default().fg(theme.gray)),
+            right_text_w,
+        );
     }
 
     fn render_bg_task_overlay(
@@ -1752,6 +1951,7 @@ mod tests {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
             started_at: Instant::now(),
@@ -2071,6 +2271,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // 12+ rows so `desired_height` is non-zero; wide enough that the
@@ -2103,6 +2304,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
         assert!(
             !pane.is_visible(),
@@ -2120,6 +2322,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
         assert!(
             pane.is_visible(),
@@ -2145,6 +2348,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         let lines = render_pane_to_strings(&mut pane, &bg_tasks, 80, 16);
@@ -2172,6 +2376,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         let lines = render_pane_to_strings(&mut pane, &bg_tasks, 80, 16);
@@ -2211,6 +2416,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // Press `/` to open the search bar.
@@ -2270,6 +2476,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // Tall enough that all entries fit without scrolling.
@@ -2324,6 +2531,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
 
         // One header + one loop row in a tall pane ⇒ not scrollable.
@@ -2383,6 +2591,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // A short panel forces the list to overflow; at the top of the list a
@@ -2414,6 +2623,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // Establish the viewport, then scroll to the very bottom.
@@ -2454,6 +2664,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         assert!(pane.items.len() >= 2);
@@ -2481,6 +2692,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         assert_eq!(pane.items.len(), 2);
@@ -2516,6 +2728,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         assert_eq!(pane.items.len(), 3);
@@ -2569,6 +2782,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
 
         // items: monitor first, then loop.
@@ -2623,6 +2837,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         assert_eq!(pane.items.len(), 1, "only running tasks shown by default");
@@ -2643,6 +2858,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // Display list interleaves a header before each group's items:
@@ -2687,6 +2903,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // Expanded: header + item.
@@ -2723,6 +2940,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(pane.entries.len(), 2);
 
@@ -2756,6 +2974,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         pane.toggle_group(GroupKind::Subagents);
@@ -2768,6 +2987,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
         assert!(!pane.collapsed_groups.contains(&GroupKind::Subagents));
 
@@ -2783,6 +3003,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(pane.entries.len(), 2);
         assert!(matches!(&pane.entries[1], TaskEntry::Agent { .. }));
@@ -2809,6 +3030,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashSet::new(),
+            &[],
         );
 
         // Ordered by agent type alphabetically: Explore before Plan.
@@ -2965,6 +3187,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -2990,6 +3213,7 @@ mod tests {
             &scheduled,
             Some("cron1"),
             &HashSet::new(),
+            &[],
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3015,6 +3239,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3036,7 +3261,14 @@ mod tests {
         );
         let mut queued = HashSet::new();
         queued.insert("q1");
-        pane.sync(&BTreeMap::new(), &HashMap::new(), &scheduled, None, &queued);
+        pane.sync(
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &scheduled,
+            None,
+            &queued,
+            &[],
+        );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
             _ => panic!("expected Scheduled"),
@@ -3062,6 +3294,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3088,6 +3321,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
         let entry = &pane.items[0];
         let label = match entry {
@@ -3115,6 +3349,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3144,6 +3379,7 @@ mod tests {
             &scheduled,
             None,
             &HashSet::new(),
+            &[],
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3153,5 +3389,150 @@ mod tests {
             !label.contains("(next") && !label.contains("(running") && !label.contains("(queued"),
             "unknown schedule should have no status suffix: {label}"
         );
+    }
+
+    fn make_workflow_run(name: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
+        crate::views::workflows::WorkflowRunSnapshot {
+            run_id: format!("wf_{name}"),
+            name: name.to_string(),
+            objective: "obj".to_string(),
+            status: status.to_string(),
+            management_available: true,
+            builtin: false,
+            phases: Vec::new(),
+            current_phase: Some("Scan".to_string()),
+            agents: Vec::new(),
+            agent_budget: None,
+            agents_used: 0,
+            agents_reserved: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 5_000,
+            received_at: Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        }
+    }
+
+    #[test]
+    fn workflows_section_lists_runs() {
+        let mut pane = TasksPane::new();
+        let runs = vec![
+            make_workflow_run("pii-purge", "active"),
+            make_workflow_run("old-scan", "complete"),
+        ];
+        pane.sync(
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &runs,
+        );
+
+        let labels: Vec<&str> = pane.entries.iter().map(|e| e.search_text()).collect();
+        assert!(
+            labels.contains(&"Workflows"),
+            "missing Workflows header: {labels:?}"
+        );
+        assert!(labels.iter().any(|l| l.contains("pii-purge")), "{labels:?}");
+        assert!(
+            !labels.iter().any(|l| l.contains("old-scan")),
+            "settled run hidden while show_done is off: {labels:?}"
+        );
+
+        let row = labels
+            .iter()
+            .find(|l| l.contains("pii-purge"))
+            .unwrap()
+            .to_string();
+        assert!(row.starts_with("Workflow "), "{row}");
+        assert!(row.contains("Scan"), "live phase suffix missing: {row}");
+    }
+
+    #[test]
+    fn workflow_children_are_excluded_and_run_counts_once() {
+        let mut pane = TasksPane::new();
+        let mut child = make_info();
+        child.workflow_run_id = Some(Arc::from("wf_deep-research"));
+        let mut subagents = HashMap::new();
+        subagents.insert("cs-1".to_string(), child);
+        let runs = vec![make_workflow_run("deep-research", "active")];
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &runs,
+        );
+        assert!(
+            pane.items
+                .iter()
+                .all(|e| !matches!(e, TaskEntry::Agent { .. }))
+        );
+        assert_eq!(
+            pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
+            1
+        );
+    }
+
+    #[test]
+    fn workflow_suffix_counts_only_running_roster_rows() {
+        let mut run = make_workflow_run("deep-research", "active");
+        run.agents = vec![
+            crate::views::workflows::WorkflowAgentRowView {
+                agent_id: "a1".into(),
+                label: "one".into(),
+                phase: None,
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+            },
+            crate::views::workflows::WorkflowAgentRowView {
+                agent_id: "a2".into(),
+                label: "two".into(),
+                phase: None,
+                model: None,
+                state: "done".into(),
+                tokens_used: 0,
+            },
+        ];
+        let entry = TaskEntry::from_workflow_run(&run);
+        assert!(entry.search_text().contains("1 agent"));
+        assert!(!entry.search_text().contains("2 agents"));
+    }
+
+    #[test]
+    fn workflow_row_stoppable_tracks_can_stop_not_is_active() {
+        fn stoppable_of(run: &crate::views::workflows::WorkflowRunSnapshot) -> bool {
+            match TaskEntry::from_workflow_run(run) {
+                TaskEntry::Workflow { stoppable, .. } => stoppable,
+                _ => panic!("expected a workflow entry"),
+            }
+        }
+
+        for status in ["active", "paused", "budget_limited"] {
+            let run = make_workflow_run("wf", status);
+            assert!(run.can_stop(), "{status} run should be stoppable");
+            assert!(stoppable_of(&run), "{status} row must be marked stoppable");
+        }
+
+        for status in ["complete", "failed", "cancelled", "interrupted"] {
+            let run = make_workflow_run("wf", status);
+            assert!(!run.can_stop(), "{status} run should not be stoppable");
+            assert!(!stoppable_of(&run), "{status} row must not be stoppable");
+        }
+
+        match TaskEntry::from_workflow_run(&make_workflow_run("wf", "paused")) {
+            TaskEntry::Workflow {
+                running, stoppable, ..
+            } => {
+                assert!(!running, "paused is not is_active()");
+                assert!(stoppable, "but paused IS can_stop()");
+            }
+            _ => panic!("expected a workflow entry"),
+        }
     }
 }

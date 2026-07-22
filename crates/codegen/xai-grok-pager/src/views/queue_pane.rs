@@ -1015,6 +1015,7 @@ mod tests {
             last_editor: None,
             kind: "prompt".into(),
             text: text.into(),
+            combined_texts: None,
             position: pos,
         }
     }
