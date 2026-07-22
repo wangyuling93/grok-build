@@ -260,6 +260,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          binary_path="target/${TARGET}/release/xai-grok-pager"
+
+          # `--timings` renders a diagnostic HTML report after linking
+          # finishes, then copies it to cargo-timing.html. A transient runner
+          # I/O error rendering that report (observed: EIO copying
+          # cargo-timing.html) must not fail the release: the binary is already
+          # built, and a failed build step would skip the sccache cache save
+          # (gated on build success) and leave the branch permanently cold.
+          set +e
           cargo build \
             --locked \
             --release \
@@ -267,6 +277,17 @@ jobs:
             --target "$TARGET" \
             --package xai-grok-pager-bin \
             --features release-dist
+          cargo_status=$?
+          set -e
+
+          if [[ "$cargo_status" -ne 0 ]]; then
+            if [[ -f "$binary_path" ]]; then
+              echo "::warning::cargo build exited ${cargo_status} but ${binary_path} exists; treating as success (post-link diagnostic failure such as the --timings report)."
+            else
+              echo "Release build failed (exit ${cargo_status}); no binary at ${binary_path}." >&2
+              exit "$cargo_status"
+            fi
+          fi
 
       - name: Report and stop sccache
         id: sccache-report
