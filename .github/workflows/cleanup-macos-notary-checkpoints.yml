@@ -1,0 +1,126 @@
+# Internal notarization checkpoints make failed-job and full-run reruns reuse
+# the exact signed DMG and Apple submission. They are private draft releases,
+# so expire them separately from Actions artifacts after the supported window.
+
+name: cleanup-macos-notary-checkpoints
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cleanup-macos-notary-checkpoints
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete expired notarization checkpoints
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      CHECKPOINT_PREFIX: grok-notary-checkpoint-
+      RETENTION_DAYS: "30"
+
+    steps:
+      - name: Delete expired draft releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_list="${RUNNER_TEMP}/macos-notary-checkpoint-releases.tsv"
+          cutoff_epoch="$(date -u --date="${RETENTION_DAYS} days ago" +%s)"
+
+          # Materialize pagination first so an API failure cannot look like an
+          # empty successful result through a process substitution.
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft == true and (.tag_name | startswith("'"$CHECKPOINT_PREFIX"'"))) | [.id, .tag_name, .updated_at] | @tsv' \
+            > "$release_list"
+
+          deleted=0
+          retained_active=0
+          retained_recent=0
+          while IFS=$'\t' read -r release_id release_tag release_updated_at; do
+            [[ -n "$release_id" ]] || continue
+            if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
+              echo "::warning::Ignoring malformed checkpoint release '${release_tag}' (${release_id})."
+              continue
+            fi
+            if [[ "$release_tag" =~ ^${CHECKPOINT_PREFIX}([0-9]+)$ ]]; then
+              run_id="${BASH_REMATCH[1]}"
+            else
+              echo "::warning::Ignoring malformed checkpoint release '${release_tag}' (${release_id})."
+              continue
+            fi
+            run_error="${RUNNER_TEMP}/checkpoint-run-${run_id}.stderr"
+            run_status=""
+            run_updated_at=""
+
+            if run_metadata="$(
+              gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                --jq '[.status, .updated_at] | @tsv' \
+                2> "$run_error"
+            )"; then
+              IFS=$'\t' read -r run_status run_updated_at <<< "$run_metadata"
+              if [[ "$run_status" != completed ]]; then
+                echo "Keeping ${release_tag}: workflow run ${run_id} is ${run_status}."
+                retained_active="$((retained_active + 1))"
+                continue
+              fi
+            elif grep -q 'HTTP 404' "$run_error"; then
+              # The workflow-run record may be deleted before its draft release.
+              run_status="missing"
+            else
+              sed -n '1,40p' "$run_error" >&2
+              echo "Could not inspect workflow run ${run_id}; refusing cleanup." >&2
+              exit 1
+            fi
+
+            # GitHub's release schema marks updated_at nullable; jq @tsv renders
+            # null as an empty field, and `date --date=""` would resolve to
+            # today (never past the cutoff), silently retaining the checkpoint
+            # forever. Surface it and keep the draft rather than mis-dating it.
+            if [[ -z "$release_updated_at" ]]; then
+              echo "::warning::Checkpoint ${release_tag} has no updated_at timestamp; keeping it and skipping age-based expiry."
+              retained_recent="$((retained_recent + 1))"
+              continue
+            fi
+            release_epoch="$(date -u --date="$release_updated_at" +%s)"
+            reference_epoch="$release_epoch"
+            if [[ "$run_status" == completed && -n "$run_updated_at" ]]; then
+              run_epoch="$(date -u --date="$run_updated_at" +%s)"
+              if (( run_epoch > reference_epoch )); then
+                reference_epoch="$run_epoch"
+              fi
+            fi
+            if (( reference_epoch >= cutoff_epoch )); then
+              retained_recent="$((retained_recent + 1))"
+              continue
+            fi
+
+            echo "Deleting expired notarization checkpoint ${release_tag}."
+            # Only delete the release object. Draft checkpoint releases own no
+            # git tag ref, so there is nothing else to remove; and if a ref of
+            # the same name does exist it belongs to a different (published or
+            # manually created) object that this reaper must not destroy.
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+            deleted="$((deleted + 1))"
+          done < "$release_list"
+
+          {
+            echo "### macOS notarization checkpoint cleanup"
+            echo
+            echo "- Retention: \`${RETENTION_DAYS} days\`"
+            echo "- Deleted: \`${deleted}\`"
+            echo "- Kept because run is active: \`${retained_active}\`"
+            echo "- Kept within retention: \`${retained_recent}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -12,7 +12,9 @@
 #   APPLE_ID
 #   APPLE_TEAM_ID
 #
-# By default this workflow only uploads an Actions artifact. Enable
+# By default the distributable output is only an Actions artifact. A private
+# draft release checkpoints signed bytes and notarization state for reruns; the
+# cleanup workflow expires those internal checkpoints after 30 days. Enable
 # `publish_github_release` to reserve a tag and publish the DMG as a prerelease.
 
 name: rust-release-macos-arm64-signed
@@ -123,7 +125,13 @@ jobs:
       contents: read
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_FEATURE_SET: release-dist
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_PACKAGE_NAME: xai-grok-pager-bin
+      CARGO_PROFILE_NAME: release
+      # Applies to the bulk disk cache archived by actions/cache below.
+      SCCACHE_CACHE_SIZE: "5G"
+      SCCACHE_VERSION: "v0.16.0"
       TARGET: aarch64-apple-darwin
 
     steps:
@@ -135,11 +143,14 @@ jobs:
         uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           targets: aarch64-apple-darwin
 
       - name: Cache Cargo dependencies
+        id: cargo-deps-cache
+        continue-on-error: true
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
@@ -150,16 +161,250 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-deps-
 
+      - name: Install sccache
+        id: sccache-install
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
+          # Statistics are captured below before the server is stopped.
+          disable_annotations: true
+
+      - name: Configure sccache disk cache
+        id: sccache-config
+        if: ${{ steps.sccache-install.outcome == 'success' }}
+        shell: bash
+        env:
+          RUSTC_CACHE_KEY: ${{ steps.rust-toolchain.outputs.cachekey }}
+        run: |
+          set -euo pipefail
+
+          # Include a digest of the workspace path: SCCACHE_BASEDIRS makes
+          # cache entries relocatable, so without this a cache built under a
+          # different absolute prefix (e.g. after a repository rename) could be
+          # reused and bake foreign paths into the signed release binary.
+          workspace_digest="$(printf '%s' "$GITHUB_WORKSPACE" | shasum -a 256 | cut -c1-12)"
+          namespace="grok-sccache-v1-macos26-${RUNNER_ARCH}-ws-${workspace_digest}-sccache-${SCCACHE_VERSION#v}-rust-${RUSTC_CACHE_KEY}-${TARGET}-profile-${CARGO_PROFILE_NAME}-package-${CARGO_PACKAGE_NAME}-features-${CARGO_FEATURE_SET}"
+          {
+            echo "RUSTC_WRAPPER=${SCCACHE_PATH}"
+            echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}"
+            echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/.sccache"
+            echo "SCCACHE_ERROR_LOG=${RUNNER_TEMP}/sccache-server.log"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          } >> "$GITHUB_ENV"
+          {
+            echo "backend=disk"
+            echo "namespace=${namespace}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Using sccache local disk storage with one bulk actions/cache transfer."
+
+      - name: Restore sccache cache
+        id: sccache-disk-restore
+        if: ${{ steps.sccache-config.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: ${{ steps.sccache-config.outputs.namespace }}-lock-${{ hashFiles('Cargo.lock') }}-sha-${{ github.sha }}
+          restore-keys: |
+            ${{ steps.sccache-config.outputs.namespace }}-lock-${{ hashFiles('Cargo.lock') }}-sha-
+            ${{ steps.sccache-config.outputs.namespace }}-lock-
+
+      - name: Start sccache
+        id: sccache-start
+        if: ${{ steps.sccache-config.outcome == 'success' }}
+        shell: bash
+        env:
+          SCCACHE_LOG: warn
+        run: |
+          set -euo pipefail
+
+          disable_sccache() {
+            local reason="$1"
+            echo "::warning::${reason}; continuing with plain rustc."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          }
+
+          # A version mismatch means the cache namespace would not match the
+          # compiler; degrade to plain rustc instead of failing the whole
+          # release build. The expected rustc version is derived from
+          # rust-toolchain.toml so there is a single source of truth.
+          version="$("$SCCACHE_PATH" --version || true)"
+          echo "$version"
+          if [[ "$version" != "sccache ${SCCACHE_VERSION#v}" ]]; then
+            disable_sccache "unexpected sccache version '${version}' (wanted 'sccache ${SCCACHE_VERSION#v}')"
+            exit 0
+          fi
+          expected_rustc="$(sed -nE 's/^channel = "([^"]+)".*/\1/p' rust-toolchain.toml)"
+          rustc_version="$(rustc --version || true)"
+          echo "$rustc_version"
+          if [[ -z "$expected_rustc" || "$rustc_version" != "rustc ${expected_rustc} "* ]]; then
+            disable_sccache "unexpected rustc version '${rustc_version}' (wanted 'rustc ${expected_rustc} ...')"
+            exit 0
+          fi
+
+          if ! "$SCCACHE_PATH" --start-server; then
+            disable_sccache "sccache server failed to start"
+            exit 0
+          fi
+          if ! "$SCCACHE_PATH" --zero-stats; then
+            "$SCCACHE_PATH" --stop-server || true
+            disable_sccache "sccache statistics reset failed"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Build release binary
+        id: build
         shell: bash
         run: |
           set -euo pipefail
           cargo build \
             --locked \
             --release \
+            --timings \
             --target "$TARGET" \
             --package xai-grok-pager-bin \
             --features release-dist
+
+      - name: Report and stop sccache
+        id: sccache-report
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          CARGO_DEPS_CACHE_HIT: ${{ steps.cargo-deps-cache.outputs.cache-hit }}
+          CARGO_DEPS_CACHE_OUTCOME: ${{ steps.cargo-deps-cache.outcome }}
+          SCCACHE_BACKEND: ${{ steps.sccache-config.outputs.backend }}
+          SCCACHE_ENABLED: ${{ steps.sccache-start.outputs.enabled }}
+          SCCACHE_INSTALL_OUTCOME: ${{ steps.sccache-install.outcome }}
+          SCCACHE_MATCHED_KEY: ${{ steps.sccache-disk-restore.outputs.cache-matched-key }}
+          SCCACHE_NAMESPACE: ${{ steps.sccache-config.outputs.namespace }}
+        run: |
+          set +e
+          stats_path="${RUNNER_TEMP}/sccache-stats.json"
+          untrusted_stats_path="${RUNNER_TEMP}/sccache-stats-untrusted.json"
+          stop_output_path="${RUNNER_TEMP}/sccache-stop.txt"
+          environment_path="${RUNNER_TEMP}/build-environment.txt"
+          sanitized_log_path="${RUNNER_TEMP}/sccache-server-sanitized.log"
+          sccache_backend="${SCCACHE_BACKEND:-disabled}"
+          sccache_enabled="${SCCACHE_ENABLED:-false}"
+          sccache_install_outcome="${SCCACHE_INSTALL_OUTCOME:-not-run}"
+          sccache_namespace="${SCCACHE_NAMESPACE:-not-configured}"
+          sccache_installed=false
+          if [[ "$sccache_install_outcome" == success \
+            && -n "${SCCACHE_PATH:-}" \
+            && -x "${SCCACHE_PATH:-}" ]]; then
+            sccache_installed=true
+          fi
+
+          {
+            rustc --version --verbose
+            cargo --version --verbose
+            if [[ "$sccache_installed" == true ]]; then
+              "$SCCACHE_PATH" --version
+            else
+              echo "sccache unavailable (install outcome: ${sccache_install_outcome})"
+            fi
+          } > "$environment_path"
+
+          diagnostics_exit_code=0
+          stats_trusted=false
+          stop_cleanly=false
+          if [[ "$sccache_enabled" == true ]]; then
+            "$SCCACHE_PATH" --show-stats
+            "$SCCACHE_PATH" --show-stats --stats-format=json | tee "$stats_path"
+            stats_exit_code="${PIPESTATUS[0]}"
+
+            # Flush disk state before actions/cache archives it. A failed stop
+            # means a zero-valued JSON report may have come from a dead daemon.
+            "$SCCACHE_PATH" --stop-server 2>&1 | tee "$stop_output_path"
+            stop_exit_code="${PIPESTATUS[0]}"
+            stats_trusted=true
+            stop_cleanly=true
+            if [[ "$stats_exit_code" -ne 0 || "$stop_exit_code" -ne 0 ]]; then
+              stats_trusted=false
+              diagnostics_exit_code=1
+              if [[ -f "$stats_path" ]]; then
+                mv "$stats_path" "$untrusted_stats_path"
+              fi
+              echo "::error::sccache statistics are untrusted because the server did not report and stop cleanly."
+            fi
+            if [[ "$stop_exit_code" -ne 0 ]]; then
+              stop_cleanly=false
+            fi
+          else
+            if [[ "$sccache_installed" == true ]]; then
+              echo "sccache was disabled before compilation; no server stop was attempted."
+            else
+              echo "sccache was unavailable; compilation used plain rustc."
+            fi > "$stop_output_path"
+          fi
+          echo "cache_safe=${stop_cleanly}" >> "$GITHUB_OUTPUT"
+
+          rust_summary="$(rustc --version 2>/dev/null || echo unavailable)"
+          if [[ "${CARGO_DEPS_CACHE_OUTCOME:-}" == "success" ]]; then
+            # actions/cache leaves cache-hit empty on a real miss.
+            cargo_deps_cache_state="${CARGO_DEPS_CACHE_HIT:-false}"
+          else
+            cargo_deps_cache_state="${CARGO_DEPS_CACHE_OUTCOME:-not-run}"
+          fi
+          {
+            echo "### Rust release compilation"
+            echo
+            echo "- Rust: \`${rust_summary}\`"
+            echo "- Cargo dependency cache exact hit: \`${cargo_deps_cache_state}\`"
+            echo "- sccache install outcome: \`${sccache_install_outcome}\`"
+            echo "- sccache backend: \`${sccache_backend}\`"
+            echo "- sccache enabled: \`${sccache_enabled}\`"
+            echo "- sccache namespace: \`${sccache_namespace}\`"
+            echo "- sccache server stopped cleanly: \`${stop_cleanly}\`"
+            if [[ -n "${SCCACHE_MATCHED_KEY}" ]]; then
+              echo "- Restored disk key: \`${SCCACHE_MATCHED_KEY}\`"
+            fi
+            if [[ "$stats_trusted" == true && -s "$stats_path" ]]; then
+              echo
+              echo '<details><summary>sccache JSON statistics</summary>'
+              echo
+              echo '```json'
+              sed -n '1,240p' "$stats_path"
+              echo '```'
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -s "${SCCACHE_ERROR_LOG:-}" ]]; then
+            sed -E 's#https?://[^[:space:]]+#<redacted-url>#g' \
+              "$SCCACHE_ERROR_LOG" > "$sanitized_log_path"
+            echo "::group::sccache warnings/errors"
+            tail -n 200 "$sanitized_log_path"
+            echo "::endgroup::"
+          fi
+          exit "$diagnostics_exit_code"
+
+      - name: Save sccache cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sccache-start.outputs.enabled == 'true' && steps.sccache-report.outputs.cache_safe == 'true' && steps.sccache-disk-restore.outcome == 'success' && steps.sccache-disk-restore.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: ${{ steps.sccache-disk-restore.outputs.cache-primary-key }}
+
+      - name: Upload build statistics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: grok-macos-arm64-build-statistics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/build-environment.txt
+            ${{ runner.temp }}/sccache-stats*.json
+            ${{ runner.temp }}/sccache-stop.txt
+            ${{ runner.temp }}/sccache-server-sanitized.log
+            target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Prepare unsigned Grok binary
         shell: bash
@@ -183,50 +428,241 @@ jobs:
           name: grok-macos-arm64-unsigned
           path: dist/unsigned/grok
           if-no-files-found: error
-          retention-days: 1
+          overwrite: true
+          retention-days: 30
 
-  sign-and-package:
+  sign-and-checkpoint:
     needs: build
-    name: Sign, notarize, and staple DMG
+    name: Sign and checkpoint DMG
     runs-on: macos-26
     timeout-minutes: 180
     environment:
       name: codesigning
       deployment: false
     permissions:
-      contents: read
+      contents: write
+    outputs:
+      checkpoint_release_tag: ${{ steps.checkpoint-store.outputs.release_tag }}
+      signed_dmg_sha256: ${{ steps.checkpoint.outputs.signed_dmg_sha256 }}
     env:
       BINARY_PATH: dist/unsigned/grok
+      CHECKPOINT_ASSET_NAME: grok-aarch64-apple-darwin.dmg
+      CHECKPOINT_RELEASE_TAG: grok-notary-checkpoint-${{ github.run_id }}
       DMG_PATH: dist/release-assets/grok-aarch64-apple-darwin.dmg
 
     steps:
+      # Actions artifacts are deleted when GitHub performs "Re-run all jobs".
+      # A draft release is private to repository writers and keeps the exact
+      # signed bytes and notarization phase markers for the lifetime of the run.
+      - name: Resolve durable signed-DMG checkpoint
+        id: checkpoint-store
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="${RUNNER_TEMP}/notary-checkpoint-release.json"
+          incomplete_assets="${RUNNER_TEMP}/notary-checkpoint-incomplete-assets.txt"
+
+          view_error="${RUNNER_TEMP}/notary-checkpoint-view.stderr"
+
+          # Resolve the checkpoint draft into "$release_json", distinguishing a
+          # genuine "does not exist yet" (HTTP 404) from a transient API
+          # failure. Conflating them lets a transient error fall through to
+          # `gh release create`; because a draft release owns no git tag ref,
+          # GitHub would then mint a SECOND draft with the same tag and orphan
+          # the immutable signed-DMG checkpoint. Exit: 0 present, 2 absent.
+          resolve_checkpoint_release() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if gh release view "$CHECKPOINT_RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json databaseId,isDraft,tagName,targetCommitish,assets \
+                > "$release_json" 2> "$view_error"; then
+                return 0
+              fi
+              if grep -qiE 'release not found|HTTP 404' "$view_error"; then
+                return 2
+              fi
+              sed -n '1,20p' "$view_error" >&2
+              echo "Checkpoint release lookup attempt ${attempt}/5 failed transiently." >&2
+              [[ "$attempt" -lt 5 ]] && sleep "$((attempt * 5))"
+            done
+            echo "Could not determine checkpoint release state after retries; refusing to risk a duplicate draft." >&2
+            return 1
+          }
+
+          set +e
+          resolve_checkpoint_release
+          resolve_status="$?"
+          set -e
+          if [[ "$resolve_status" -eq 1 ]]; then
+            exit 1
+          fi
+          if [[ "$resolve_status" -eq 2 ]]; then
+            gh release create "$CHECKPOINT_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "Internal macOS notarization checkpoint for run ${GITHUB_RUN_ID}" \
+              --notes "Private durable state for GitHub Actions run ${GITHUB_RUN_ID}. Do not publish or edit while that run may be retried."
+            set +e
+            resolve_checkpoint_release
+            resolve_status="$?"
+            set -e
+            if [[ "$resolve_status" -ne 0 ]]; then
+              echo "Checkpoint release not resolvable immediately after creation; a later rerun will retry." >&2
+              exit 1
+            fi
+          fi
+
+          python3 - \
+            "$release_json" \
+            "$CHECKPOINT_RELEASE_TAG" \
+            "$GITHUB_SHA" \
+            "$CHECKPOINT_ASSET_NAME" \
+            "$GITHUB_OUTPUT" \
+            "$incomplete_assets" <<'PY'
+          import json
+          import re
+          import sys
+
+          (
+              path,
+              expected_tag,
+              expected_sha,
+              asset_name,
+              output_path,
+              incomplete_assets_path,
+          ) = sys.argv[1:]
+          with open(path, encoding="utf-8") as release_file:
+              release = json.load(release_file)
+          if not isinstance(release, dict):
+              raise SystemExit("Malformed checkpoint release response")
+          if release.get("isDraft") is not True:
+              raise SystemExit("Checkpoint release must remain a draft")
+          if release.get("tagName") != expected_tag:
+              raise SystemExit("Checkpoint release tag mismatch")
+          if release.get("targetCommitish") != expected_sha:
+              raise SystemExit(
+                  f"Checkpoint commit mismatch: {release.get('targetCommitish')!r} != {expected_sha!r}"
+              )
+          release_id = release.get("databaseId")
+          if not isinstance(release_id, int) or release_id <= 0:
+              raise SystemExit("Invalid checkpoint release ID")
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              raise SystemExit("Malformed checkpoint release assets")
+          matches = [asset for asset in assets if asset.get("name") == asset_name]
+          if len(matches) > 1:
+              raise SystemExit(f"Multiple checkpoint assets named {asset_name!r}")
+          checkpoint_found = False
+          incomplete_asset_ids = []
+          if matches:
+              asset = matches[0]
+              asset_state = asset.get("state")
+              if asset_state == "uploaded":
+                  checkpoint_found = True
+              elif asset_state in {"open", "starter"}:
+                  api_url = asset.get("apiUrl")
+                  match = re.search(r"/releases/assets/([1-9][0-9]*)$", str(api_url))
+                  if match is None:
+                      raise SystemExit("Invalid API URL for incomplete signed-DMG asset")
+                  incomplete_asset_ids.append(match.group(1))
+              else:
+                  raise SystemExit(
+                      f"Unexpected signed-DMG checkpoint asset state: {asset_state!r}"
+                  )
+          with open(output_path, "a", encoding="utf-8") as output_file:
+              output_file.write(f"release_id={release_id}\n")
+              output_file.write(f"release_tag={expected_tag}\n")
+              output_file.write(
+                  f"checkpoint_found={'true' if checkpoint_found else 'false'}\n"
+              )
+          with open(incomplete_assets_path, "w", encoding="utf-8") as asset_file:
+              for asset_id in incomplete_asset_ids:
+                  asset_file.write(f"{asset_id}\n")
+          PY
+
+          while IFS= read -r asset_id; do
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+            echo "Deleting incomplete signed-DMG checkpoint asset ${asset_id}."
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < "$incomplete_assets"
+
+      # Fail fast on invalid notarization credentials before the expensive
+      # signing work. Notarization itself runs in a later job; without this an
+      # expired app-specific password is not discovered until the binary and
+      # DMG have already been signed and durably checkpointed.
+      - name: Validate notarization credentials
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
+          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
+          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
+
+          keychain_path="${RUNNER_TEMP}/grok-credential-preflight.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::${keychain_password}"
+          cleanup_preflight_keychain() {
+            security delete-keychain "$keychain_path" 2>/dev/null || true
+          }
+          trap cleanup_preflight_keychain EXIT
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          xcrun notarytool store-credentials "grok-credential-preflight" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$keychain_path" \
+            --validate
+
+      - name: Restore durable signed-DMG checkpoint
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$DMG_PATH")"
+          gh release download "$CHECKPOINT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$CHECKPOINT_ASSET_NAME" \
+            --output "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+
       - name: Download unsigned Grok binary
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: grok-macos-arm64-unsigned
           path: dist/unsigned
 
-      - name: Import Developer ID certificate and notarization credentials
+      - name: Import Developer ID certificate
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
         shell: bash
         env:
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
           APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
-          APPLE_ID: ${{ vars.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
 
-          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
           : "${APPLE_DEVELOPER_ID_P12:?Missing codesigning secret APPLE_DEVELOPER_ID_P12}"
           : "${APPLE_DEVELOPER_ID_P12_PASSWORD:?Missing codesigning secret APPLE_DEVELOPER_ID_P12_PASSWORD}"
-          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
-          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
 
           certificate_path="${RUNNER_TEMP}/developer-id-application.p12"
           keychain_path="${RUNNER_TEMP}/grok-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
-          notary_profile="grok-notary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "::add-mask::${keychain_password}"
           echo "SIGNING_KEYCHAIN_PATH=${keychain_path}" >> "$GITHUB_ENV"
 
@@ -257,19 +693,10 @@ jobs:
             exit 1
           fi
 
-          xcrun notarytool store-credentials "$notary_profile" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --keychain "$keychain_path" \
-            --validate
-
-          {
-            echo "NOTARY_PROFILE=${notary_profile}"
-            echo "SIGNING_IDENTITY=${signing_identity}"
-          } >> "$GITHUB_ENV"
+          echo "SIGNING_IDENTITY=${signing_identity}" >> "$GITHUB_ENV"
 
       - name: Sign Grok binary
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -288,22 +715,138 @@ jobs:
           codesign --display --verbose=4 "$BINARY_PATH"
 
       - name: Create and sign DMG
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          dmg_root="${RUNNER_TEMP}/grok-dmg-root"
+          attach_plist="${RUNNER_TEMP}/grok-dmg-create-attach.plist"
+          mount_dir="${RUNNER_TEMP}/grok-dmg-create-mount"
+          writable_dmg="${RUNNER_TEMP}/grok-writable.dmg"
+          attached_device=""
 
-          rm -rf "$dmg_root"
-          mkdir -p "$dmg_root" "$(dirname "$DMG_PATH")"
-          ditto "$BINARY_PATH" "${dmg_root}/grok"
-          rm -f "$DMG_PATH"
+          detach_writable_dmg() {
+            local device="$attached_device"
+            [[ -n "$device" ]] || return 0
+            if ! hdiutil detach "$device"; then
+              hdiutil detach -force "$device"
+            fi
+            attached_device=""
+          }
+          cleanup_writable_dmg() {
+            local exit_code="$?"
+            set +e
+            detach_writable_dmg
+            rm -f "$attach_plist" "$writable_dmg"
+            rmdir "$mount_dir" 2>/dev/null || true
+            return "$exit_code"
+          }
+          trap cleanup_writable_dmg EXIT
 
+          test -f "$BINARY_PATH"
+          rm -rf "$mount_dir"
+          mkdir -p "$mount_dir" "$(dirname "$DMG_PATH")"
+          rm -f "$attach_plist" "$writable_dmg" "$DMG_PATH"
+
+          binary_bytes="$(stat -f '%z' "$BINARY_PATH")"
+          [[ "$binary_bytes" =~ ^[1-9][0-9]*$ ]]
+          binary_mib="$(( (binary_bytes + 1024 * 1024 - 1) / (1024 * 1024) ))"
+          # hdiutil's folder-image auto-sizing can under-allocate the temporary
+          # volume on macOS 26. Give the single binary 256 MiB of explicit
+          # filesystem headroom; compression removes unused blocks afterward.
+          image_size_mib="$((binary_mib + 256))"
+          required_free_kib="$(( (image_size_mib + 512) * 1024 ))"
+          free_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')"
+          [[ "$free_kib" =~ ^[0-9]+$ ]]
+
+          echo "Signed binary logical size: ${binary_bytes} bytes (${binary_mib} MiB rounded up)."
+          echo "Writable DMG capacity: ${image_size_mib} MiB."
+          echo "Required host free-space floor: ${required_free_kib} KiB."
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          du -sh "$BINARY_PATH"
+          if (( free_kib < required_free_kib )); then
+            echo "::error::Insufficient runner disk space before DMG creation: ${free_kib} KiB available, ${required_free_kib} KiB required. Re-run this job on a fresh runner."
+            exit 1
+          fi
+
+          # Build a padded writable filesystem first instead of asking
+          # `hdiutil create -srcfolder` to guess its capacity.
           hdiutil create \
+            -size "${image_size_mib}m" \
+            -fs HFS+ \
             -volname "Grok" \
-            -srcfolder "$dmg_root" \
+            -type UDIF \
+            -nospotlight \
+            -ov \
+            "$writable_dmg"
+
+          hdiutil attach "$writable_dmg" \
+            -nobrowse \
+            -noautoopen \
+            -mountpoint "$mount_dir" \
+            -plist \
+            > "$attach_plist"
+          attached_device="$(python3 - "$attach_plist" "$mount_dir" <<'PY'
+          import os
+          import plistlib
+          import re
+          import sys
+
+          with open(sys.argv[1], "rb") as plist_file:
+              report = plistlib.load(plist_file)
+          expected_mount = os.path.realpath(sys.argv[2])
+          matches = []
+          for entity in report.get("system-entities", []):
+              mount_point = entity.get("mount-point")
+              if mount_point and os.path.realpath(mount_point) == expected_mount:
+                  matches.append(entity.get("dev-entry"))
+          if len(matches) != 1 or not isinstance(matches[0], str):
+              raise SystemExit(f"Could not resolve attached DMG device: {matches!r}")
+          if re.fullmatch(r"/dev/disk[0-9]+s[0-9]+", matches[0]) is None:
+              raise SystemExit(f"Unexpected attached DMG device: {matches[0]!r}")
+          print(matches[0])
+          PY
+          )"
+          test -n "$attached_device"
+
+          # A writable HFS+ mount creates a .fseventsd service directory. Keep
+          # the no_log marker in place so fseventsd does NOT flush event logs
+          # into the volume when it is unmounted below. Deleting the marker
+          # before detach lets the daemon repopulate .fseventsd after the
+          # content check has already passed, poisoning the signed image with a
+          # second top-level entry that only surfaces after notarization.
+          # .fseventsd/no_log is standard, notarization-safe DMG metadata.
+          metadata_dir="${mount_dir}/.fseventsd"
+          mkdir -p "$metadata_dir"
+          : > "${metadata_dir}/no_log"
+          ditto "$BINARY_PATH" "${mount_dir}/grok"
+          chmod 0755 "${mount_dir}/grok"
+          if ! cmp -s "$BINARY_PATH" "${mount_dir}/grok"; then
+            echo "Staged grok binary does not match the signed input:" >&2
+            cmp "$BINARY_PATH" "${mount_dir}/grok" >&2 || true
+            exit 1
+          fi
+
+          # The only user-visible payload must be the grok binary; the
+          # .fseventsd metadata directory is expected and allowed. Anything
+          # else (e.g. a stray .DS_Store from a browsable mount) is an
+          # unexpected write and fails the build.
+          unexpected="$(find "$mount_dir" -mindepth 1 -maxdepth 1 ! -name grok ! -name .fseventsd -print)"
+          if [[ ! -f "${mount_dir}/grok" || -n "$unexpected" ]]; then
+            echo "Unexpected writable DMG contents:" >&2
+            find "$mount_dir" -mindepth 1 -maxdepth 2 -print >&2
+            exit 1
+          fi
+
+          detach_writable_dmg
+          hdiutil convert "$writable_dmg" \
             -format UDZO \
             -ov \
-            "$DMG_PATH"
+            -o "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+
+          rm -f "$attach_plist" "$writable_dmg"
+          rmdir "$mount_dir"
+          trap - EXIT
 
           codesign \
             --force \
@@ -313,35 +856,1207 @@ jobs:
             "$DMG_PATH"
           codesign --verify --strict --verbose=2 "$DMG_PATH"
 
-      - name: Notarize and staple DMG
+      - name: Checkpoint signed DMG
+        id: checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hdiutil verify "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          signed_dmg_sha256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+
+          {
+            echo "signed_dmg_sha256=${signed_dmg_sha256}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Signed DMG notarization checkpoint"
+            echo
+            echo "- Durable draft release: \`${CHECKPOINT_RELEASE_TAG}\`"
+            echo "- Reused existing checkpoint: \`${{ steps.checkpoint-store.outputs.checkpoint_found }}\`"
+            echo "- Pre-submit SHA-256: \`${signed_dmg_sha256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persist signed DMG before notarization
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ steps.checkpoint.outputs.signed_dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          verification_dir="${RUNNER_TEMP}/checkpoint-verification"
+          mkdir -p "$verification_dir"
+
+          # Do not use --clobber: an existing asset is an immutable lease on the
+          # exact bytes that all reruns must reuse.
+          gh release upload "$CHECKPOINT_RELEASE_TAG" "$DMG_PATH" \
+            --repo "$GITHUB_REPOSITORY"
+          gh release download "$CHECKPOINT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$CHECKPOINT_ASSET_NAME" \
+            --output "${verification_dir}/${CHECKPOINT_ASSET_NAME}"
+          persisted_sha256="$(
+            shasum -a 256 "${verification_dir}/${CHECKPOINT_ASSET_NAME}" | awk '{print $1}'
+          )"
+          if [[ "$persisted_sha256" != "$EXPECTED_SHA256" ]]; then
+            echo "Persisted signed-DMG checkpoint hash mismatch." >&2
+            exit 1
+          fi
+
+      - name: Delete temporary signing keychain
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          fi
+          rm -f "${RUNNER_TEMP}/developer-id-application.p12"
+
+  notarize-and-package:
+    needs: sign-and-checkpoint
+    name: Submit, resume, and staple DMG
+    runs-on: macos-26
+    timeout-minutes: 90
+    environment:
+      name: codesigning
+      deployment: false
+    permissions:
+      contents: write
+    env:
+      CHECKPOINT_ASSET_NAME: grok-aarch64-apple-darwin.dmg
+      CHECKPOINT_RELEASE_TAG: ${{ needs.sign-and-checkpoint.outputs.checkpoint_release_tag }}
+      DMG_PATH: dist/release-assets/grok-aarch64-apple-darwin.dmg
+      NOTARY_INTENT_ASSET: notarization-intent.json
+      NOTARY_STATE_ASSET: notarization-submission-state.json
+      NOTARY_SUBMIT_AUTHORIZED_ASSET: notarization-submit-authorized.json
+      # NOTARY_SUBMISSION_NAME is derived at runtime from the signed DMG's
+      # SHA-256 (first step below) so it is unique per byte-generation.
+      SIGNED_DMG_SHA256: ${{ needs.sign-and-checkpoint.outputs.signed_dmg_sha256 }}
+
+    steps:
+      - name: Derive deterministic submission name
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SIGNED_DMG_SHA256:?Missing signed DMG SHA-256}"
+          [[ "$SIGNED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          # Bind the Apple submission name to the signed bytes. A re-signed DMG
+          # (a new generation of this run after, e.g., a lost checkpoint) has a
+          # different SHA and therefore a different submission name, so
+          # name-based history recovery can never pin a stale submission that
+          # notarized different bytes and wedge every subsequent rerun.
+          echo "NOTARY_SUBMISSION_NAME=grok-notary-${GITHUB_REPOSITORY_ID}-${GITHUB_RUN_ID}-${SIGNED_DMG_SHA256:0:16}.dmg" >> "$GITHUB_ENV"
+
+      - name: Download exact signed DMG checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$DMG_PATH")"
+          gh release download "$CHECKPOINT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$CHECKPOINT_ASSET_NAME" \
+            --output "$DMG_PATH"
+
+      - name: Import notarization credentials
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
+          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
+          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
+
+          keychain_path="${RUNNER_TEMP}/grok-notary.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          notary_profile="grok-notary-wait-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "::add-mask::${keychain_password}"
+          echo "NOTARY_KEYCHAIN_PATH=${keychain_path}" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 7200 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          xcrun notarytool store-credentials "$notary_profile" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$keychain_path" \
+            --validate
+
+          echo "NOTARY_PROFILE=${notary_profile}" >> "$GITHUB_ENV"
+
+      - name: Prepare deterministic notarization identity
         shell: bash
         run: |
           set -euo pipefail
           report_dir="macos-notarization/aarch64-apple-darwin"
-          report_path="${report_dir}/dmg-notarytool-submit.json"
+          intent_path="${report_dir}/notarization-intent.json"
+          upload_path="${RUNNER_TEMP}/${NOTARY_SUBMISSION_NAME}"
           mkdir -p "$report_dir"
 
-          xcrun notarytool submit "$DMG_PATH" \
-            --keychain-profile "$NOTARY_PROFILE" \
-            --keychain "$SIGNING_KEYCHAIN_PATH" \
-            --wait \
-            --timeout 45m \
-            --output-format json \
-            | tee "$report_path"
+          : "${CHECKPOINT_RELEASE_TAG:?Missing durable checkpoint release tag}"
+          : "${NOTARY_INTENT_ASSET:?Missing notarization intent asset name}"
+          : "${NOTARY_STATE_ASSET:?Missing notarization state asset name}"
+          : "${NOTARY_SUBMIT_AUTHORIZED_ASSET:?Missing submit-authorized asset name}"
+          : "${NOTARY_SUBMISSION_NAME:?Missing notarization submission name}"
+          : "${SIGNED_DMG_SHA256:?Missing signed DMG SHA-256}"
+          [[ "$SIGNED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test -f "$DMG_PATH"
 
-          python3 - "$report_path" <<'PY'
+          actual_sha256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+          if [[ "$actual_sha256" != "$SIGNED_DMG_SHA256" ]]; then
+            echo "Checkpoint hash mismatch before notarization." >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "$actual_sha256" "$DMG_PATH" \
+            > "${report_dir}/dmg-pre-submit-sha256.txt"
+
+          # notarytool uses the uploaded file's basename in history. Keep this
+          # name stable across failed-job reruns and bind it to the exact bytes.
+          cp "$DMG_PATH" "$upload_path"
+          upload_sha256="$(shasum -a 256 "$upload_path" | awk '{print $1}')"
+          if [[ "$upload_sha256" != "$SIGNED_DMG_SHA256" ]]; then
+            echo "Notarization upload copy hash mismatch." >&2
+            exit 1
+          fi
+
+          python3 - \
+            "$intent_path" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_SHA" \
+            "$CHECKPOINT_RELEASE_TAG" \
+            "$NOTARY_SUBMISSION_NAME" \
+            "$SIGNED_DMG_SHA256" <<'PY'
           import json
           import sys
 
-          with open(sys.argv[1], encoding="utf-8") as report_file:
-              report = json.load(report_file)
-          if report.get("status") != "Accepted":
-              raise SystemExit(f"Notarization was not accepted: {report}")
+          (
+              path,
+              run_id,
+              source_commit,
+              checkpoint_release_tag,
+              submission_name,
+              sha256,
+          ) = sys.argv[1:]
+          with open(path, "w", encoding="utf-8") as intent_file:
+              json.dump(
+                  {
+                      "schemaVersion": 2,
+                      "workflowRunId": run_id,
+                      "sourceCommit": source_commit,
+                      "checkpointReleaseTag": checkpoint_release_tag,
+                      "submissionName": submission_name,
+                      "signedDmgSha256": sha256,
+                  },
+                  intent_file,
+                  indent=2,
+                  sort_keys=True,
+              )
+              intent_file.write("\n")
           PY
 
-          xcrun stapler staple -v "$DMG_PATH"
+          echo "NOTARY_UPLOAD_PATH=${upload_path}" >> "$GITHUB_ENV"
+
+      - name: Restore durable notarization phases
+        id: durable-notary-state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="${RUNNER_TEMP}/notary-checkpoint-release.json"
+          phase_state="${RUNNER_TEMP}/notary-phase-state.env"
+          incomplete_assets="${RUNNER_TEMP}/notary-phase-incomplete-assets.txt"
+          durable_dir="macos-notarization/durable"
+          mkdir -p "$durable_dir"
+
+          gh release view "$CHECKPOINT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,tagName,targetCommitish,assets \
+            > "$release_json"
+
+          python3 - \
+            "$release_json" \
+            "$CHECKPOINT_RELEASE_TAG" \
+            "$GITHUB_SHA" \
+            "$NOTARY_INTENT_ASSET" \
+            "$NOTARY_SUBMIT_AUTHORIZED_ASSET" \
+            "$NOTARY_STATE_ASSET" \
+            "$GITHUB_OUTPUT" \
+            "$phase_state" \
+            "$incomplete_assets" <<'PY'
+          import json
+          import re
+          import sys
+
+          (
+              path,
+              expected_tag,
+              expected_sha,
+              intent_name,
+              submit_authorized_name,
+              state_name,
+              output_path,
+              phase_state_path,
+              incomplete_assets_path,
+          ) = sys.argv[1:]
+          with open(path, encoding="utf-8") as release_file:
+              release = json.load(release_file)
+          if not isinstance(release, dict):
+              raise SystemExit("Malformed checkpoint release response")
+          if release.get("isDraft") is not True:
+              raise SystemExit("Checkpoint release must remain a draft")
+          if release.get("tagName") != expected_tag:
+              raise SystemExit("Checkpoint release tag mismatch")
+          if release.get("targetCommitish") != expected_sha:
+              raise SystemExit("Checkpoint release commit mismatch")
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              raise SystemExit("Malformed checkpoint release assets")
+          names = [intent_name, submit_authorized_name, state_name]
+          found = {}
+          incomplete_asset_ids = []
+          for name in names:
+              matches = [asset for asset in assets if asset.get("name") == name]
+              if len(matches) > 1:
+                  raise SystemExit(f"Multiple durable assets named {name!r}")
+              found[name] = False
+              if matches:
+                  asset = matches[0]
+                  asset_state = asset.get("state")
+                  if asset_state == "uploaded":
+                      found[name] = True
+                  elif asset_state in {"open", "starter"}:
+                      api_url = asset.get("apiUrl")
+                      match = re.search(r"/releases/assets/([1-9][0-9]*)$", str(api_url))
+                      if match is None:
+                          raise SystemExit(f"Invalid API URL for incomplete asset {name!r}")
+                      incomplete_asset_ids.append(match.group(1))
+                  else:
+                      raise SystemExit(
+                          f"Unexpected durable asset state for {name!r}: {asset_state!r}"
+                      )
+          if found[state_name] and not (
+              found[intent_name] and found[submit_authorized_name]
+          ):
+              raise SystemExit("Submission state exists without all earlier phase markers")
+          if found[submit_authorized_name] and not found[intent_name]:
+              raise SystemExit("Submit-authorized marker exists without notarization intent")
+          with open(output_path, "a", encoding="utf-8") as output_file:
+              output_file.write(f"intent_found={'true' if found[intent_name] else 'false'}\n")
+              output_file.write(
+                  "submit_authorized_found="
+                  f"{'true' if found[submit_authorized_name] else 'false'}\n"
+              )
+              output_file.write(f"state_found={'true' if found[state_name] else 'false'}\n")
+          with open(phase_state_path, "w", encoding="utf-8") as phase_file:
+              phase_file.write(f"intent_found={'true' if found[intent_name] else 'false'}\n")
+              phase_file.write(
+                  "submit_authorized_found="
+                  f"{'true' if found[submit_authorized_name] else 'false'}\n"
+              )
+              phase_file.write(f"state_found={'true' if found[state_name] else 'false'}\n")
+          with open(incomplete_assets_path, "w", encoding="utf-8") as asset_file:
+              for asset_id in incomplete_asset_ids:
+                  asset_file.write(f"{asset_id}\n")
+          PY
+
+          while IFS= read -r asset_id; do
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+            echo "Deleting incomplete notarization phase asset ${asset_id}."
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < "$incomplete_assets"
+
+          download_asset() {
+            local asset_name="$1"
+            local output_path="$2"
+            gh release download "$CHECKPOINT_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset_name" \
+              --output "$output_path"
+          }
+          source "$phase_state"
+          if [[ "$intent_found" == "true" ]]; then
+            download_asset "$NOTARY_INTENT_ASSET" "${durable_dir}/${NOTARY_INTENT_ASSET}"
+          fi
+          if [[ "$submit_authorized_found" == "true" ]]; then
+            download_asset "$NOTARY_SUBMIT_AUTHORIZED_ASSET" "${durable_dir}/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          fi
+          if [[ "$state_found" == "true" ]]; then
+            download_asset "$NOTARY_STATE_ASSET" "${durable_dir}/${NOTARY_STATE_ASSET}"
+          fi
+
+      - name: Validate restored notarization phases
+        if: ${{ steps.durable-notary-state.outputs.intent_found == 'true' }}
+        shell: bash
+        env:
+          STATE_FOUND: ${{ steps.durable-notary-state.outputs.state_found }}
+          SUBMIT_AUTHORIZED_FOUND: ${{ steps.durable-notary-state.outputs.submit_authorized_found }}
+        run: |
+          set -euo pipefail
+          durable_dir="macos-notarization/durable"
+          prior_intent_path="${durable_dir}/${NOTARY_INTENT_ASSET}"
+          submit_authorized_path="${durable_dir}/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          state_path="${durable_dir}/${NOTARY_STATE_ASSET}"
+          current_intent_path="macos-notarization/aarch64-apple-darwin/notarization-intent.json"
+
+          test -f "$prior_intent_path"
+          test -f "$current_intent_path"
+          python3 - \
+            "$prior_intent_path" \
+            "$submit_authorized_path" \
+            "$state_path" \
+            "$SUBMIT_AUTHORIZED_FOUND" \
+            "$STATE_FOUND" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_SHA" \
+            "$CHECKPOINT_RELEASE_TAG" \
+            "$NOTARY_SUBMISSION_NAME" \
+            "$SIGNED_DMG_SHA256" \
+            "$GITHUB_ENV" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          (
+              intent_path,
+              submit_authorized_path,
+              state_path,
+              submit_authorized_found,
+              state_found,
+              run_id,
+              source_commit,
+              checkpoint_release_tag,
+              submission_name,
+              sha256,
+              github_env,
+          ) = sys.argv[1:]
+          expected = {
+              "schemaVersion": 2,
+              "workflowRunId": run_id,
+              "sourceCommit": source_commit,
+              "checkpointReleaseTag": checkpoint_release_tag,
+              "submissionName": submission_name,
+              "signedDmgSha256": sha256,
+          }
+
+          def load_object(path, label):
+              with open(path, encoding="utf-8") as input_file:
+                  value = json.load(input_file)
+              if not isinstance(value, dict):
+                  raise SystemExit(f"Malformed {label}: expected an object")
+              return value
+
+          def validate_identity(value, label):
+              for key, expected_value in expected.items():
+                  if value.get(key) != expected_value:
+                      raise SystemExit(
+                          f"{label} mismatch for {key}: "
+                          f"{value.get(key)!r} != {expected_value!r}"
+                      )
+
+          intent = load_object(intent_path, "notarization intent")
+          validate_identity(intent, "Notarization intent")
+
+          if submit_authorized_found == "true":
+              marker = load_object(submit_authorized_path, "submit-authorized marker")
+              validate_identity(marker, "Submit-authorized marker")
+              if marker.get("phase") != "submit-authorized":
+                  raise SystemExit("Invalid submit-authorized marker phase")
+
+          if state_found == "true":
+              state = load_object(state_path, "notarization submission state")
+              validate_identity(state, "Notarization submission state")
+              if state.get("phase") != "submission-recorded":
+                  raise SystemExit("Invalid notarization submission state phase")
+              try:
+                  submission_id = str(uuid.UUID(str(state.get("submissionId"))))
+              except (ValueError, AttributeError) as error:
+                  raise SystemExit("Invalid saved notarization submission UUID") from error
+              with open(github_env, "a", encoding="utf-8") as env_file:
+                  env_file.write(f"SUBMISSION_ID={submission_id}\n")
+                  env_file.write("SUBMISSION_SOURCE=state-release\n")
+          PY
+
+          if ! cmp -s "$prior_intent_path" "$current_intent_path"; then
+            echo "Restored notarization intent does not match the current run's intent:" >&2
+            cmp "$prior_intent_path" "$current_intent_path" >&2 || true
+            exit 1
+          fi
+          if [[ "$SUBMIT_AUTHORIZED_FOUND" == "true" ]]; then
+            cp \
+              "$submit_authorized_path" \
+              "macos-notarization/aarch64-apple-darwin/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          fi
+          if [[ "$STATE_FOUND" == "true" ]]; then
+            echo "Recovered the saved Apple submission from the durable draft release."
+          fi
+
+      - name: Find an existing Apple submission
+        id: existing-submission
+        if: ${{ steps.durable-notary-state.outputs.state_found != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Apple returns up to 100 team-wide entries. Keep the unfiltered
+          # response out of the uploaded diagnostic artifact.
+          history_path="${RUNNER_TEMP}/dmg-notarytool-history.json"
+
+          history_available=false
+          for attempt in 1 2 3; do
+            if xcrun notarytool history \
+              --keychain-profile "$NOTARY_PROFILE" \
+              --keychain "$NOTARY_KEYCHAIN_PATH" \
+              --output-format json \
+              --no-progress \
+              > "${history_path}.tmp"; then
+              mv "${history_path}.tmp" "$history_path"
+              history_available=true
+              break
+            fi
+            rm -f "${history_path}.tmp"
+            echo "Apple notarization history query ${attempt}/3 failed." >&2
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((attempt * 5))"
+            fi
+          done
+          if [[ "$history_available" != true ]]; then
+            echo "Could not query Apple notarization history; refusing to submit." >&2
+            exit 1
+          fi
+
+          set +e
+          submission_id="$(python3 - "$history_path" "$NOTARY_SUBMISSION_NAME" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          with open(sys.argv[1], encoding="utf-8") as history_file:
+              report = json.load(history_file)
+          if not isinstance(report, dict):
+              raise SystemExit("Malformed notarization history: expected an object")
+          history = report.get("history")
+          if not isinstance(history, list):
+              raise SystemExit("Malformed notarization history: expected a history array")
+
+          expected_name = sys.argv[2]
+          matches = []
+          for entry in history:
+              if not isinstance(entry, dict):
+                  raise SystemExit("Malformed notarization history entry")
+              if entry.get("name") == expected_name:
+                  matches.append(entry)
+
+          if not matches:
+              raise SystemExit(3)
+
+          normalized = []
+          for entry in matches:
+              try:
+                  submission_id = uuid.UUID(str(entry.get("id")))
+              except (ValueError, AttributeError) as error:
+                  raise SystemExit(
+                      f"Invalid notarization history UUID: {entry.get('id')}"
+                  ) from error
+              normalized.append((entry, submission_id))
+
+          # A runner can disappear after Apple accepts a submission but before
+          # its ID is checkpointed. A later availability retry may therefore
+          # produce more than one entry for this globally unique workflow name.
+          # Prefer an accepted submission, then one still processing, and use
+          # the newest entry within the same status class.
+          status_priority = {
+              "Accepted": 3,
+              "In Progress": 2,
+              "Invalid": 1,
+              "Rejected": 1,
+          }
+          selected_entry, selected_id = max(
+              normalized,
+              key=lambda item: (
+                  status_priority.get(str(item[0].get("status")), 0),
+                  str(item[0].get("createdDate", "")),
+                  str(item[1]),
+              ),
+          )
+          if len(normalized) > 1:
+              ids = [str(submission_id) for _, submission_id in normalized]
+              print(
+                  f"Multiple same-run submissions found for {expected_name}: {ids}; "
+                  f"selected {selected_id} ({selected_entry.get('status')}).",
+                  file=sys.stderr,
+              )
+          print(selected_id)
+          PY
+          )"
+          lookup_exit_code="$?"
+          set -e
+
+          case "$lookup_exit_code" in
+            0)
+              {
+                echo "submission_found=true"
+                echo "submission_id=${submission_id}"
+              } >> "$GITHUB_OUTPUT"
+              {
+                echo "SUBMISSION_ID=${submission_id}"
+                echo "SUBMISSION_SOURCE=history"
+              } >> "$GITHUB_ENV"
+              echo "Recovered Apple submission ${submission_id} from history."
+              ;;
+            3)
+              echo "submission_found=false" >> "$GITHUB_OUTPUT"
+              echo "No existing Apple submission has the deterministic name."
+              ;;
+            *)
+              echo "Apple notarization history was malformed; refusing to submit." >&2
+              exit "$lookup_exit_code"
+              ;;
+          esac
+
+      - name: Persist notarization intent
+        if: ${{ steps.durable-notary-state.outputs.state_found != 'true' && steps.durable-notary-state.outputs.intent_found != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          durable_dir="macos-notarization/durable"
+          verification_dir="${RUNNER_TEMP}/intent-verification"
+          source_path="macos-notarization/aarch64-apple-darwin/notarization-intent.json"
+          durable_path="${durable_dir}/${NOTARY_INTENT_ASSET}"
+          mkdir -p "$durable_dir" "$verification_dir"
+          cp "$source_path" "$durable_path"
+
+          gh release upload "$CHECKPOINT_RELEASE_TAG" "$durable_path" \
+            --repo "$GITHUB_REPOSITORY"
+          gh release download "$CHECKPOINT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$NOTARY_INTENT_ASSET" \
+            --output "${verification_dir}/${NOTARY_INTENT_ASSET}"
+          if ! cmp -s "$durable_path" "${verification_dir}/${NOTARY_INTENT_ASSET}"; then
+            echo "Persisted notarization intent did not round-trip intact:" >&2
+            cmp "$durable_path" "${verification_dir}/${NOTARY_INTENT_ASSET}" >&2 || true
+            exit 1
+          fi
+
+      # Persist authorization before invoking Apple so a rerun searches history
+      # before it uploads again. This marker is not proof that submit ran: after
+      # a bounded series of successful no-match queries, availability recovery
+      # may create a replacement submission for the same exact checkpoint.
+      - name: Persist submit-authorized marker
+        if: ${{ steps.durable-notary-state.outputs.state_found != 'true' && steps.durable-notary-state.outputs.submit_authorized_found != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          durable_dir="macos-notarization/durable"
+          marker_path="${durable_dir}/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          intent_path="${durable_dir}/${NOTARY_INTENT_ASSET}"
+          mkdir -p "$durable_dir"
+          test -f "$intent_path"
+
+          python3 - \
+            "$marker_path" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_SHA" \
+            "$CHECKPOINT_RELEASE_TAG" \
+            "$NOTARY_SUBMISSION_NAME" \
+            "$SIGNED_DMG_SHA256" \
+            "$GITHUB_RUN_ATTEMPT" <<'PY'
+          from datetime import datetime, timezone
+          import json
+          import sys
+
+          (
+              path,
+              run_id,
+              source_commit,
+              checkpoint_release_tag,
+              submission_name,
+              sha256,
+              run_attempt,
+          ) = sys.argv[1:]
+          with open(path, "w", encoding="utf-8") as marker_file:
+              json.dump(
+                  {
+                      "schemaVersion": 2,
+                      "workflowRunId": run_id,
+                      "sourceCommit": source_commit,
+                      "checkpointReleaseTag": checkpoint_release_tag,
+                      "submissionName": submission_name,
+                      "signedDmgSha256": sha256,
+                      "phase": "submit-authorized",
+                      "authorizationCreationRunAttempt": run_attempt,
+                      "authorizedAt": datetime.now(timezone.utc).isoformat(),
+                  },
+                  marker_file,
+                  indent=2,
+                  sort_keys=True,
+              )
+              marker_file.write("\n")
+          PY
+
+          cp \
+            "$marker_path" \
+            "macos-notarization/aarch64-apple-darwin/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          gh release upload "$CHECKPOINT_RELEASE_TAG" "$marker_path" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Submit or recover the intended submission
+        if: ${{ steps.existing-submission.outputs.submission_found == 'false' }}
+        shell: bash
+        env:
+          PRIOR_SUBMIT_AUTHORIZED: ${{ steps.durable-notary-state.outputs.submit_authorized_found }}
+        run: |
+          set -euo pipefail
+          report_dir="macos-notarization/aarch64-apple-darwin"
+          history_path="${RUNNER_TEMP}/dmg-notarytool-history.json"
+          durable_intent_path="macos-notarization/durable/${NOTARY_INTENT_ASSET}"
+          submit_authorized_path="macos-notarization/durable/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          submit_path="${report_dir}/dmg-notarytool-submit.json"
+          submit_stderr_path="${report_dir}/dmg-notarytool-submit-stderr.txt"
+          mkdir -p "$report_dir"
+
+          validate_phase_identity() {
+            python3 - \
+              "$1" \
+              "$2" \
+              "$GITHUB_RUN_ID" \
+              "$GITHUB_SHA" \
+              "$CHECKPOINT_RELEASE_TAG" \
+              "$NOTARY_SUBMISSION_NAME" \
+              "$SIGNED_DMG_SHA256" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as intent_file:
+              phase = json.load(intent_file)
+          if not isinstance(phase, dict):
+              raise SystemExit("Malformed durable notarization phase: expected an object")
+          expected = {
+              "schemaVersion": 2,
+              "workflowRunId": sys.argv[3],
+              "sourceCommit": sys.argv[4],
+              "checkpointReleaseTag": sys.argv[5],
+              "submissionName": sys.argv[6],
+              "signedDmgSha256": sys.argv[7],
+          }
+          for key, value in expected.items():
+              if phase.get(key) != value:
+                  raise SystemExit(
+                      f"Durable notarization phase mismatch for {key}: "
+                      f"{phase.get(key)!r} != {value!r}"
+                  )
+          expected_phase = sys.argv[2]
+          if expected_phase and phase.get("phase") != expected_phase:
+              raise SystemExit(
+                  f"Durable notarization phase mismatch: {phase.get('phase')!r}"
+              )
+          PY
+          }
+
+          query_history() {
+            if xcrun notarytool history \
+              --keychain-profile "$NOTARY_PROFILE" \
+              --keychain "$NOTARY_KEYCHAIN_PATH" \
+              --output-format json \
+              --no-progress \
+              > "${history_path}.tmp"; then
+              mv "${history_path}.tmp" "$history_path"
+              return 0
+            fi
+            rm -f "${history_path}.tmp"
+            return 1
+          }
+
+          find_history_submission() {
+            python3 - "$history_path" "$NOTARY_SUBMISSION_NAME" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          with open(sys.argv[1], encoding="utf-8") as history_file:
+              report = json.load(history_file)
+          if not isinstance(report, dict):
+              raise SystemExit("Malformed notarization history: expected an object")
+          history = report.get("history")
+          if not isinstance(history, list):
+              raise SystemExit("Malformed notarization history: expected a history array")
+
+          matches = []
+          for entry in history:
+              if not isinstance(entry, dict):
+                  raise SystemExit("Malformed notarization history entry")
+              if entry.get("name") == sys.argv[2]:
+                  matches.append(entry)
+          if not matches:
+              raise SystemExit(3)
+
+          normalized = []
+          for entry in matches:
+              try:
+                  submission_id = uuid.UUID(str(entry.get("id")))
+              except (ValueError, AttributeError) as error:
+                  raise SystemExit("Invalid notarization history UUID") from error
+              normalized.append((entry, submission_id))
+
+          status_priority = {
+              "Accepted": 3,
+              "In Progress": 2,
+              "Invalid": 1,
+              "Rejected": 1,
+          }
+          selected_entry, selected_id = max(
+              normalized,
+              key=lambda item: (
+                  status_priority.get(str(item[0].get("status")), 0),
+                  str(item[0].get("createdDate", "")),
+                  str(item[1]),
+              ),
+          )
+          if len(normalized) > 1:
+              ids = [str(submission_id) for _, submission_id in normalized]
+              print(
+                  f"Multiple same-run submissions found: {ids}; selected "
+                  f"{selected_id} ({selected_entry.get('status')}).",
+                  file=sys.stderr,
+              )
+          print(selected_id)
+          PY
+          }
+
+          poll_history() {
+            local attempt delay parse_exit_code recovered_id
+            local successful_queries=0
+            local required_successful_queries=3
+            for attempt in 1 2 3 4 5 6; do
+              delay="$((attempt * 10))"
+              if query_history; then
+                successful_queries="$((successful_queries + 1))"
+                set +e
+                recovered_id="$(find_history_submission)"
+                parse_exit_code="$?"
+                set -e
+                case "$parse_exit_code" in
+                  0)
+                    printf '%s\n' "$recovered_id"
+                    return 0
+                    ;;
+                  3)
+                    ;;
+                  *)
+                    return "$parse_exit_code"
+                    ;;
+                esac
+              else
+                echo "Apple notarization history query ${attempt}/6 failed." >&2
+              fi
+              if [[ "$attempt" -lt 6 ]]; then
+                echo "Submission is not visible yet; recovery retry ${attempt}/6 in ${delay}s." >&2
+                sleep "$delay"
+              fi
+            done
+            if (( successful_queries < required_successful_queries )); then
+              return 4
+            fi
+            return 3
+          }
+
+          validate_phase_identity "$durable_intent_path" ""
+          validate_phase_identity "$submit_authorized_path" "submit-authorized"
+
+          submission_id=""
+          submission_source=""
+          should_submit=true
+          if [[ "$PRIOR_SUBMIT_AUTHORIZED" == "true" ]]; then
+            echo "A prior submit authorization exists; searching Apple before any replacement upload."
+            set +e
+            submission_id="$(poll_history)"
+            recovery_exit_code="$?"
+            set -e
+            case "$recovery_exit_code" in
+              0)
+                should_submit=false
+                submission_source="submit-authorization-history"
+                ;;
+              3)
+                echo "::warning::No Apple submission became visible after successful history queries; allowing a replacement upload for the same signed checkpoint."
+                ;;
+              4)
+                echo "Apple history did not return enough successful checks; refusing a blind replacement upload." >&2
+                exit "$recovery_exit_code"
+                ;;
+              *)
+                echo "Apple history was malformed while recovering the authorized submission." >&2
+                exit "$recovery_exit_code"
+                ;;
+            esac
+          else
+            echo "The new submit authorization is verified; allowing an upload attempt."
+          fi
+
+          if [[ "$should_submit" == true ]]; then
+            set +e
+            xcrun notarytool submit "$NOTARY_UPLOAD_PATH" \
+              --keychain-profile "$NOTARY_PROFILE" \
+              --keychain "$NOTARY_KEYCHAIN_PATH" \
+              --no-wait \
+              --output-format json \
+              --no-progress \
+              > "$submit_path" \
+              2> "$submit_stderr_path"
+            submit_exit_code="$?"
+            set -e
+            if [[ -s "$submit_stderr_path" ]]; then
+              sed -n '1,200p' "$submit_stderr_path" >&2
+            fi
+            printf '%s\n' "$submit_exit_code" > "${report_dir}/dmg-notarytool-submit-exit-code.txt"
+
+            set +e
+            submission_id="$(python3 - "$submit_path" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as submit_file:
+                  report = json.load(submit_file)
+              if not isinstance(report, dict):
+                  raise ValueError("expected an object")
+              print(uuid.UUID(str(report.get("id"))))
+          except (FileNotFoundError, json.JSONDecodeError, ValueError, AttributeError):
+              raise SystemExit(3)
+          PY
+            )"
+            submit_parse_exit_code="$?"
+            set -e
+
+            if [[ "$submit_parse_exit_code" -eq 0 ]]; then
+              if [[ "$submit_exit_code" -eq 0 ]]; then
+                submission_source="submit"
+              else
+                submission_source="submit-output-after-error"
+              fi
+            else
+              echo "Submission returned no usable ID (exit ${submit_exit_code}); recovering by deterministic name." >&2
+              set +e
+              submission_id="$(poll_history)"
+              recovery_exit_code="$?"
+              set -e
+              if [[ "$recovery_exit_code" -ne 0 ]]; then
+                echo "Upload outcome is ambiguous. A rerun will query Apple before deciding whether a replacement upload is needed." >&2
+                exit "$recovery_exit_code"
+              fi
+              submission_source="history-after-submit"
+            fi
+          fi
+
+          python3 - "$submission_id" <<'PY'
+          import sys
+          import uuid
+
+          try:
+              uuid.UUID(sys.argv[1])
+          except (ValueError, AttributeError) as error:
+              raise SystemExit(f"Invalid recovered submission UUID: {sys.argv[1]!r}") from error
+          PY
+          {
+            echo "SUBMISSION_ID=${submission_id}"
+            echo "SUBMISSION_SOURCE=${submission_source}"
+          } >> "$GITHUB_ENV"
+
+      - name: Record notarization submission state
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="macos-notarization/aarch64-apple-darwin"
+          state_path="${report_dir}/submission-state.json"
+          mkdir -p "$report_dir"
+
+          : "${SUBMISSION_ID:?Missing notarization submission ID}"
+          : "${SUBMISSION_SOURCE:?Missing notarization submission source}"
+          python3 - \
+            "$state_path" \
+            "$SUBMISSION_ID" \
+            "$SUBMISSION_SOURCE" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_SHA" \
+            "$CHECKPOINT_RELEASE_TAG" \
+            "$NOTARY_SUBMISSION_NAME" \
+            "$SIGNED_DMG_SHA256" \
+            "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          (
+              path,
+              submission_id,
+              source,
+              run_id,
+              source_commit,
+              checkpoint_release_tag,
+              submission_name,
+              sha256,
+              run_attempt,
+          ) = sys.argv[1:]
+          submission_id = str(uuid.UUID(submission_id))
+          with open(path, "w", encoding="utf-8") as state_file:
+              json.dump(
+                  {
+                      "schemaVersion": 2,
+                      "workflowRunId": run_id,
+                      "sourceCommit": source_commit,
+                      "checkpointReleaseTag": checkpoint_release_tag,
+                      "submissionName": submission_name,
+                      "signedDmgSha256": sha256,
+                      "phase": "submission-recorded",
+                      "submissionId": submission_id,
+                      "submissionSource": source,
+                      "stateCreationRunAttempt": run_attempt,
+                  },
+                  state_file,
+                  indent=2,
+                  sort_keys=True,
+              )
+              state_file.write("\n")
+          PY
+
+          {
+            echo "### Apple notarization submission"
+            echo
+            echo "- Submission ID: \`${SUBMISSION_ID}\`"
+            echo "- Submission name: \`${NOTARY_SUBMISSION_NAME}\`"
+            echo "- Submission source: \`${SUBMISSION_SOURCE}\`"
+            echo "- Durable draft release: \`${CHECKPOINT_RELEASE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persist notarization submission state
+        if: ${{ steps.durable-notary-state.outputs.state_found != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          durable_dir="macos-notarization/durable"
+          verification_dir="${RUNNER_TEMP}/submission-state-verification"
+          source_path="macos-notarization/aarch64-apple-darwin/submission-state.json"
+          durable_path="${durable_dir}/${NOTARY_STATE_ASSET}"
+          mkdir -p "$durable_dir" "$verification_dir"
+          test -f "${durable_dir}/${NOTARY_INTENT_ASSET}"
+          test -f "${durable_dir}/${NOTARY_SUBMIT_AUTHORIZED_ASSET}"
+          cp "$source_path" "$durable_path"
+
+          gh release upload "$CHECKPOINT_RELEASE_TAG" "$durable_path" \
+            --repo "$GITHUB_REPOSITORY"
+          gh release download "$CHECKPOINT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$NOTARY_STATE_ASSET" \
+            --output "${verification_dir}/${NOTARY_STATE_ASSET}"
+          if ! cmp -s "$durable_path" "${verification_dir}/${NOTARY_STATE_ASSET}"; then
+            echo "Persisted notarization submission state did not round-trip intact:" >&2
+            cmp "$durable_path" "${verification_dir}/${NOTARY_STATE_ASSET}" >&2 || true
+            exit 1
+          fi
+
+      - name: Resume and inspect Apple notarization
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="macos-notarization/aarch64-apple-darwin"
+          wait_log="${report_dir}/dmg-notarytool-wait.txt"
+          info_path="${report_dir}/dmg-notarytool-info.json"
+          log_path="${report_dir}/dmg-notarytool-log.json"
+          mkdir -p "$report_dir"
+
+          : "${SUBMISSION_ID:?Missing notarization submission ID}"
+          : "${SIGNED_DMG_SHA256:?Missing signed DMG SHA-256}"
+          test -f "$DMG_PATH"
+          actual_sha256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+          if [[ "$actual_sha256" != "$SIGNED_DMG_SHA256" ]]; then
+            echo "Checkpoint hash mismatch before notarization wait." >&2
+            exit 1
+          fi
+
+          # A timeout only stops this client; Apple keeps processing. Query the
+          # same submission afterward and never automatically upload it again.
+          set +e
+          xcrun notarytool wait "$SUBMISSION_ID" \
+            --keychain-profile "$NOTARY_PROFILE" \
+            --keychain "$NOTARY_KEYCHAIN_PATH" \
+            --timeout 45m \
+            2>&1 | tee "$wait_log"
+          wait_exit_code="${PIPESTATUS[0]}"
+          set -e
+          printf '%s\n' "$wait_exit_code" > "${report_dir}/dmg-notarytool-wait-exit-code.txt"
+
+          info_available=false
+          for attempt in 1 2 3 4 5 6; do
+            if xcrun notarytool info "$SUBMISSION_ID" \
+              --keychain-profile "$NOTARY_PROFILE" \
+              --keychain "$NOTARY_KEYCHAIN_PATH" \
+              --output-format json \
+              > "${info_path}.tmp"; then
+              mv "${info_path}.tmp" "$info_path"
+              info_available=true
+              break
+            fi
+            echo "Notarization status query ${attempt}/6 failed." >&2
+            if [[ "$attempt" -lt 6 ]]; then
+              sleep "$((attempt * 5))"
+            fi
+          done
+          if [[ "$info_available" != true ]]; then
+            echo "Could not query Apple submission ${SUBMISSION_ID}; do not resubmit it." >&2
+            exit 1
+          fi
+
+          status="$(python3 - \
+            "$info_path" \
+            "$SUBMISSION_ID" \
+            "$NOTARY_SUBMISSION_NAME" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          with open(sys.argv[1], encoding="utf-8") as info_file:
+              info = json.load(info_file)
+          if not isinstance(info, dict):
+              raise SystemExit("Malformed notarization info: expected an object")
+          try:
+              actual_id = uuid.UUID(str(info.get("id")))
+              expected_id = uuid.UUID(sys.argv[2])
+          except ValueError as error:
+              raise SystemExit(f"Invalid submission UUID: {info}") from error
+          if actual_id != expected_id:
+              raise SystemExit(f"Submission ID mismatch: {actual_id} != {expected_id}")
+          if info.get("name") != sys.argv[3]:
+              raise SystemExit(
+                  f"Submission name mismatch: {info.get('name')!r} != {sys.argv[3]!r}"
+              )
+          status = info.get("status")
+          if not isinstance(status, str) or not status:
+              raise SystemExit(f"Missing notarization status: {info}")
+          print(status)
+          PY
+          )"
+
+          {
+            echo "### Apple notarization"
+            echo
+            echo "- Submission ID: \`${SUBMISSION_ID}\`"
+            echo "- Wait exit code: \`${wait_exit_code}\`"
+            echo "- Queried status: \`${status}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$status" in
+            Accepted|Invalid|Rejected)
+              log_available=false
+              for attempt in 1 2 3; do
+                if xcrun notarytool log "$SUBMISSION_ID" \
+                  --keychain-profile "$NOTARY_PROFILE" \
+                  --keychain "$NOTARY_KEYCHAIN_PATH" \
+                  "$log_path"; then
+                  log_available=true
+                  break
+                fi
+                echo "Notarization log retrieval ${attempt}/3 failed." >&2
+                if [[ "$attempt" -lt 3 ]]; then
+                  sleep "$((attempt * 10))"
+                fi
+              done
+              ;;
+            *)
+              log_available=false
+              ;;
+          esac
+
+          if [[ "$status" != "Accepted" ]]; then
+            if [[ "$status" == "In Progress" ]]; then
+              echo "Submission ${SUBMISSION_ID} is still processing. Re-run only failed jobs later to resume this ID." >&2
+            else
+              echo "Submission ${SUBMISSION_ID} finished with status '${status}'. Review the uploaded report." >&2
+            fi
+            exit 1
+          fi
+          if [[ "$log_available" != true ]]; then
+            echo "Accepted submission ${SUBMISSION_ID}, but its log could not be retrieved." >&2
+            exit 1
+          fi
+
+          python3 - \
+            "$log_path" \
+            "$SUBMISSION_ID" \
+            "$SIGNED_DMG_SHA256" \
+            "$NOTARY_SUBMISSION_NAME" <<'PY'
+          import json
+          import sys
+          import uuid
+
+          with open(sys.argv[1], encoding="utf-8") as log_file:
+              report = json.load(log_file)
+          if not isinstance(report, dict):
+              raise SystemExit("Malformed notarization log: expected an object")
+          try:
+              actual_id = uuid.UUID(str(report.get("jobId")))
+              expected_id = uuid.UUID(sys.argv[2])
+          except ValueError as error:
+              raise SystemExit(f"Invalid notarization log UUID: {report.get('jobId')}") from error
+          expected_sha256 = sys.argv[3].lower()
+          if actual_id != expected_id:
+              raise SystemExit(f"Notarization log ID mismatch: {actual_id} != {expected_id}")
+          if report.get("status") != "Accepted":
+              raise SystemExit(f"Notarization log is not accepted: {report.get('status')}")
+          if str(report.get("sha256", "")).lower() != expected_sha256:
+              raise SystemExit("Apple notarized a different DMG checksum")
+          if report.get("archiveFilename") != sys.argv[4]:
+              raise SystemExit("Apple notarized a different archive filename")
+          PY
+
+      - name: Staple and validate accepted DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="macos-notarization/aarch64-apple-darwin"
+
+          actual_sha256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+          if [[ "$actual_sha256" != "$SIGNED_DMG_SHA256" ]]; then
+            echo "Checkpoint changed before stapling." >&2
+            exit 1
+          fi
+
+          stapled=false
+          for attempt in 1 2 3; do
+            if xcrun stapler staple -v "$DMG_PATH"; then
+              stapled=true
+              break
+            fi
+            echo "Ticket stapling ${attempt}/3 failed." >&2
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((attempt * 10))"
+            fi
+          done
+          if [[ "$stapled" != true ]]; then
+            echo "Could not staple accepted submission ${SUBMISSION_ID}." >&2
+            exit 1
+          fi
+
           xcrun stapler validate -v "$DMG_PATH"
-          shasum -a 256 "$DMG_PATH" > "${report_dir}/dmg-sha256.txt"
+          hdiutil verify "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          spctl -a -t open -vvv --context context:primary-signature "$DMG_PATH"
+          shasum -a 256 "$DMG_PATH" > "${report_dir}/dmg-stapled-sha256.txt"
 
       - name: Verify signed DMG contents
         shell: bash
@@ -362,45 +2077,61 @@ jobs:
           trap cleanup_mount EXIT
 
           test -f "${mount_dir}/grok"
-          test "$(find "$mount_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "1"
+          # Require grok to be the only user-visible entry; allow the benign
+          # .fseventsd metadata directory that a writable HFS+ mount leaves.
+          if [[ -n "$(find "$mount_dir" -mindepth 1 -maxdepth 1 ! -name grok ! -name .fseventsd -print)" ]]; then
+            echo "Unexpected signed DMG contents:" >&2
+            find "$mount_dir" -mindepth 1 -maxdepth 2 -print >&2
+            exit 1
+          fi
           lipo "${mount_dir}/grok" -verify_arch arm64
           codesign --verify --strict --verbose=2 "${mount_dir}/grok"
+          # NOTE: `spctl --assess --type execute` is intentionally NOT run here.
+          # Gatekeeper's execute assessment rejects every non-bundle CLI binary
+          # ("valid but does not seem to be an app", exit 3) even when correctly
+          # Developer ID signed and notarized, which would fail this step on
+          # every run. The DMG's notarization and staple are already verified
+          # above via `xcrun stapler validate` and, in the staple step, the
+          # primary-signature `spctl -a -t open` assessment of the DMG itself.
 
           cleanup_mount
           trap - EXIT
           ls -lah "$(dirname "$DMG_PATH")"
 
-      - name: Upload signed DMG
+      - name: Upload signed, notarized, and stapled DMG
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: grok-macos-arm64-signed
           path: dist/release-assets/grok-aarch64-apple-darwin.dmg
           if-no-files-found: error
-          retention-days: 14
+          compression-level: 0
+          overwrite: true
+          retention-days: 30
 
       - name: Upload notarization report
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: grok-macos-arm64-notarization
+          name: grok-macos-arm64-notarization-${{ github.run_id }}-${{ github.run_attempt }}
           path: macos-notarization/aarch64-apple-darwin/
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
 
-      - name: Delete temporary signing keychain
+      - name: Delete temporary notarization keychain
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
-          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" ]]; then
-            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          if [[ -n "${NOTARY_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$NOTARY_KEYCHAIN_PATH" || true
           fi
-          rm -f "${RUNNER_TEMP}/developer-id-application.p12"
 
   publish:
     if: ${{ inputs.publish_github_release }}
     needs:
       - reserve-release-tag
-      - sign-and-package
+      - notarize-and-package
     name: Publish GitHub prerelease
     runs-on: ubuntu-latest
     permissions:
