@@ -957,8 +957,10 @@ jobs:
       name: codesigning
       deployment: false
     permissions:
-      # Read-only: download the signed-DMG checkpoint; no release asset writes.
-      contents: read
+      # contents: write is required so GITHUB_TOKEN can see *draft* checkpoint
+      # releases (read alone yields "release not found" for drafts). This job
+      # only downloads the signed DMG; it does not upload release assets.
+      contents: write
     env:
       CHECKPOINT_ASSET_NAME: grok-aarch64-apple-darwin.dmg
       CHECKPOINT_RELEASE_TAG: ${{ needs.sign-and-checkpoint.outputs.checkpoint_release_tag }}
