@@ -1,6 +1,7 @@
 # Internal notarization checkpoints make failed-job and full-run reruns reuse
-# the exact signed DMG and Apple submission. They are private draft releases,
-# so expire them separately from Actions artifacts after the supported window.
+# the exact signed DMG. Apple submission recovery is name-based notarytool
+# history. Checkpoints are private draft releases, so expire them separately
+# from Actions artifacts after the supported window.
 
 name: cleanup-macos-notary-checkpoints
 
