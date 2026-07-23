@@ -9,6 +9,7 @@ mod helpers;
 mod transparency_persist;
 
 use super::actions;
+use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
 pub use helpers::ConversationsPartial;
@@ -254,6 +255,7 @@ pub(crate) fn execute(
                     .insert("sessionId".into(), serde_json::json!(sid));
             }
             let restore_code = session_flags.restore_code;
+            let resume_local_miss = session_flags.resume_local_miss.clone();
             tracing::info!(
                 ?restore_code,
                 ?load_session_id,
@@ -263,6 +265,9 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     if let Some(sid) = load_session_id {
+                        let local_miss = resume_local_miss
+                            .as_deref()
+                            .filter(|t| *t == sid);
                         let resume_started = std::time::Instant::now();
                         let wt_type = xai_grok_shell::util::config::worktree_type();
                         let copy_mode = if git_ref.is_some() {
@@ -306,10 +311,9 @@ pub(crate) fn execute(
                             );
                                 return TaskResult::WorktreeSessionFailed {
                                     agent_id,
-                                    error: sanitize_user_error(
-                                        &format!(
-                                    "couldn't resume worktree session: {e}"
-                                ),
+                                    error: worktree_resume_failure_message(
+                                        local_miss,
+                                        &sanitize_user_error(&e.to_string()),
                                     ),
                                 };
                             }
@@ -321,10 +325,9 @@ pub(crate) fn execute(
                             Err(e) => {
                                 return TaskResult::WorktreeSessionFailed {
                                     agent_id,
-                                    error: sanitize_user_error(
-                                        &format!(
-                                    "couldn't resume worktree session: {e}"
-                                ),
+                                    error: worktree_resume_failure_message(
+                                        local_miss,
+                                        &sanitize_user_error(&e.to_string()),
                                     ),
                                 };
                             }
@@ -339,10 +342,9 @@ pub(crate) fn execute(
                                 .unwrap_or_else(|| err.to_string());
                             return TaskResult::WorktreeSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!(
-                                "couldn't resume worktree session: {msg}"
-                            ),
+                                error: worktree_resume_failure_message(
+                                    local_miss,
+                                    &sanitize_user_error(&msg),
                                 ),
                             };
                         }
@@ -1873,7 +1875,6 @@ pub(crate) fn execute(
         Effect::ApplyDoctorFix { target, plan } => {
             tasks
                 .spawn(async move {
-                    let shell = plan.shell;
                     let result = tokio::task::spawn_blocking(move || crate::diagnostics::apply_fix(
                             *plan,
                         ))
@@ -1882,7 +1883,6 @@ pub(crate) fn execute(
                         .and_then(|result| result.map_err(|error| error.to_string()));
                     TaskResult::DoctorFixApplied {
                         target,
-                        shell,
                         result,
                     }
                 });
