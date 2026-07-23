@@ -2163,6 +2163,7 @@ fn render_row(
         return;
     }
     let selected = state.selected.as_ref().is_some_and(|s| *s == row.id);
+    let hovered = state.hovered_row.as_ref().is_some_and(|h| *h == row.id);
     let renaming = state.rename.as_ref().is_some_and(|r| r.row == row.id);
     let bg = row_bg(theme, state, row);
 
@@ -2177,7 +2178,7 @@ fn render_row(
     }
     if hovered && !selected {
         buf.set_style(
-            Rect::new(rect.x, rect.y, rect.width, content_h),
+            Rect::new(rect.x, rect.y + content_top, rect.width, content_h),
             theme.hover_overlay_style(bg),
         );
     }

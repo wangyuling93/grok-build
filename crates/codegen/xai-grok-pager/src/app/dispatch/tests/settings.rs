@@ -244,6 +244,7 @@ fn transparency_guard_covers_background_and_nested_subagent_work() {
                 created_at: std::time::Instant::now(),
                 next_fire_at: None,
                 tag: "loop".into(),
+                last_subagent_id: None,
             },
         );
     }
