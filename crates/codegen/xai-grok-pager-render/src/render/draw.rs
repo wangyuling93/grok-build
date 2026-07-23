@@ -575,8 +575,10 @@ mod tests {
 
         fn render_bytes(transparent: bool) -> Vec<u8> {
             crate::theme::cache::set_transparent_background(transparent);
-            let (tx, rx) = mpsc::channel::<Vec<u8>>();
-            let backend = CrosstermBackend::new(TermWriter::new(tx, WriterSync::new()));
+            let (tx, rx) = mpsc::channel::<WriterPayload>();
+            let backend = CrosstermBackend::new(
+                TermWriter::new(tx, WriterSync::new()).expect("single test writer"),
+            );
             let mut terminal = xai_ratatui_inline::Terminal::with_options(
                 backend,
                 TerminalOptions {
@@ -585,7 +587,7 @@ mod tests {
             )
             .expect("build terminal");
             draw_frame(&mut terminal, &mut CursorState::new(), render_inverse);
-            rx.try_iter().flatten().collect()
+            rx.try_iter().flat_map(|payload| payload.data).collect()
         }
 
         fn contains(bytes: &[u8], needle: &[u8]) -> bool {
