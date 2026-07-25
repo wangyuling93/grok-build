@@ -3489,6 +3489,7 @@ mod tests {
                 model: None,
                 state: "running".into(),
                 tokens_used: 0,
+                duration_ms: 0,
             },
             crate::views::workflows::WorkflowAgentRowView {
                 agent_id: "a2".into(),
@@ -3497,6 +3498,7 @@ mod tests {
                 model: None,
                 state: "done".into(),
                 tokens_used: 0,
+                duration_ms: 0,
             },
         ];
         let entry = TaskEntry::from_workflow_run(&run);
