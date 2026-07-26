@@ -1039,6 +1039,7 @@ fn transparent_selected_setting_row_uses_non_background_cue() {
         &theme,
         false,
         false,
+        None,
     );
 
     let label_x = (0..area.width)
@@ -1062,6 +1063,7 @@ fn transparent_selected_setting_row_uses_non_background_cue() {
         &theme,
         false,
         false,
+        None,
     );
     let unselected = &unselected_buf[(label_x, 0)];
     assert!(

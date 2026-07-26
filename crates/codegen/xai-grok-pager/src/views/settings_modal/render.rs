@@ -2311,15 +2311,29 @@ pub(super) fn row_layout(
     }
 }
 
-/// Terminal-native themes collapse selection tokens to `Reset`; use ANSI
-/// `DarkGray` (not silver `Gray`, which washes out default fg on dark profiles).
+/// Resolve the list-row background for Browse/picker chrome.
+///
+/// - **Opaque themes:** selection / hover use `bg_visual` / `bg_hover`.
+/// - **Terminal-native** (profile canvas is `Reset`): selection tokens are not
+///   RGB-safe; use ANSI `DarkGray` (not silver `Gray`, which washes out default
+///   fg on dark profiles).
+/// - **Transparent solid** (`transparent_elevated`): paint slots are `Reset`
+///   but `canvas` stays solid. Keep `Reset` so the host shows through; selection
+///   is carried by [`Theme::selection_overlay_style`] text cues instead of a
+///   DarkGray band (which would look like an opaque selection on glass).
 pub(super) fn settings_list_row_bg(theme: &Theme, is_selected: bool, is_hovered: bool) -> Color {
-    if crate::theme::cache::terminal_native_locked() || matches!(theme.bg_visual, Color::Reset) {
+    let terminal_native = crate::theme::cache::terminal_native_locked()
+        || matches!(theme.design_canvas(), Color::Reset);
+    if terminal_native {
         return if is_selected || is_hovered {
             Color::DarkGray
         } else {
             Color::Reset
         };
+    }
+    if matches!(theme.bg_base, Color::Reset) {
+        // Transparent solid: every passive paint slot is Reset.
+        return Color::Reset;
     }
     if is_selected {
         theme.bg_visual
