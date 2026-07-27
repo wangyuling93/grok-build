@@ -12,22 +12,33 @@
 #   APPLE_ID
 #   APPLE_TEAM_ID
 #
-# By default the distributable output is only an Actions artifact. A private
-# draft release checkpoints the signed DMG for reruns; notarization diagnostics
-# stay on Actions artifacts (not release assets). The cleanup workflow expires
-# those internal checkpoints after 30 days. Enable `publish_github_release` to
-# reserve a tag and publish the DMG as a prerelease.
+# A private draft release checkpoints the signed DMG for reruns; notarization
+# diagnostics stay on Actions artifacts (not release assets). The cleanup
+# workflow expires those internal checkpoints after 30 days.
+#
+# Run:
+#   - Automatically on push to main (build, sign, notarize, publish GitHub
+#     prerelease). Covers direct pushes and fork/upstream merges into main.
+#   - Manually: Actions → rust-release-macos-arm64-signed → Run workflow
+#   "Publish GitHub Release" defaults to true (checked). Creates prerelease tag:
+#     grok-macos-arm64-v{Cargo.toml version}-{7-char commit}
+#   Short SHA ties the tag to the built commit: same version + same commit →
+#   same tag. Re-runs and re-dispatches replace assets on that release
+#   (overwrite_files: true).
 
 name: rust-release-macos-arm64-signed
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       publish_github_release:
         description: Create a GitHub prerelease and attach the signed DMG
         required: false
         type: boolean
-        default: false
+        default: true
       tag:
         description: >-
           Optional release tag. Leave empty to use
@@ -40,12 +51,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag || 'auto' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag || github.sha }}
   cancel-in-progress: false
 
 jobs:
   reserve-release-tag:
-    if: ${{ inputs.publish_github_release }}
+    # Push to main always publishes; workflow_dispatch follows the checkbox
+    # (default true).
+    if: ${{ github.event_name == 'push' || inputs.publish_github_release }}
     name: Reserve release tag
     runs-on: ubuntu-latest
     permissions:
@@ -1638,7 +1651,9 @@ jobs:
           fi
 
   publish:
-    if: ${{ inputs.publish_github_release }}
+    # Push to main always publishes; workflow_dispatch follows the checkbox
+    # (default true).
+    if: ${{ github.event_name == 'push' || inputs.publish_github_release }}
     needs:
       - reserve-release-tag
       - notarize-and-package
