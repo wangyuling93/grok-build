@@ -17,14 +17,16 @@
 # workflow expires those internal checkpoints after 30 days.
 #
 # Run:
-#   - Automatically on push to main (build, sign, notarize, publish GitHub
-#     prerelease). Covers direct pushes and fork/upstream merges into main.
+#   - Automatically on push to main (build, sign, notarize, create/update GitHub
+#     prerelease, then verify it). Covers direct pushes and fork/upstream merges
+#     into main. Auto-run always publishes a prerelease (no checkbox).
 #   - Manually: Actions → rust-release-macos-arm64-signed → Run workflow
-#   "Publish GitHub Release" defaults to true (checked). Creates prerelease tag:
+#   "Create a GitHub prerelease" defaults to true (checked). Tag shape:
 #     grok-macos-arm64-v{Cargo.toml version}-{7-char commit}
 #   Short SHA ties the tag to the built commit: same version + same commit →
 #   same tag. Re-runs and re-dispatches replace assets on that release
-#   (overwrite_files: true).
+#   (overwrite_files: true). Publish fails closed if the release is missing,
+#   not marked prerelease, still draft, or lacks the DMG asset.
 
 name: rust-release-macos-arm64-signed
 
@@ -56,9 +58,9 @@ concurrency:
 
 jobs:
   reserve-release-tag:
-    # Push to main always publishes; workflow_dispatch follows the checkbox
-    # (default true).
-    if: ${{ github.event_name == 'push' || inputs.publish_github_release }}
+    # Auto-run (push to main) always reserves a prerelease tag. Manual runs
+    # follow the "Create a GitHub prerelease" checkbox (default true).
+    if: ${{ github.event_name == 'push' || inputs.publish_github_release == true }}
     name: Reserve release tag
     runs-on: ubuntu-latest
     permissions:
@@ -1651,9 +1653,9 @@ jobs:
           fi
 
   publish:
-    # Push to main always publishes; workflow_dispatch follows the checkbox
-    # (default true).
-    if: ${{ github.event_name == 'push' || inputs.publish_github_release }}
+    # Auto-run (push to main) always creates/updates a GitHub prerelease.
+    # Manual runs follow the "Create a GitHub prerelease" checkbox (default true).
+    if: ${{ github.event_name == 'push' || inputs.publish_github_release == true }}
     needs:
       - reserve-release-tag
       - notarize-and-package
@@ -1706,9 +1708,85 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: ${{ needs.reserve-release-tag.outputs.release_version }} (${{ needs.reserve-release-tag.outputs.short_sha }}, macOS arm64)
           tag_name: ${{ needs.reserve-release-tag.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           body_path: ${{ steps.notes.outputs.path }}
           files: release-assets/grok-aarch64-apple-darwin.dmg
           overwrite_files: true
           fail_on_unmatched_files: true
+          draft: false
           make_latest: false
           prerelease: true
+
+      # Fail closed: auto-run and manual publish must leave a real prerelease
+      # (not a draft checkpoint) with the signed DMG attached.
+      - name: Verify GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.reserve-release-tag.outputs.release_tag }}
+          EXPECTED_ASSET: grok-aarch64-apple-darwin.dmg
+        run: |
+          set -euo pipefail
+          : "${RELEASE_TAG:?missing release tag}"
+          meta_path="${RUNNER_TEMP}/published-prerelease.json"
+          gh release view "$RELEASE_TAG" \
+            --json tagName,isPrerelease,isDraft,targetCommitish,assets \
+            > "$meta_path"
+
+          python3 - "$meta_path" "$RELEASE_TAG" "$GITHUB_SHA" "$EXPECTED_ASSET" <<'PY'
+          import json
+          import sys
+
+          path, expected_tag, expected_sha, expected_asset = sys.argv[1:5]
+          with open(path, encoding="utf-8") as handle:
+              release = json.load(handle)
+
+          errors = []
+          if release.get("tagName") != expected_tag:
+              errors.append(
+                  f"tagName {release.get('tagName')!r} != {expected_tag!r}"
+              )
+          if release.get("isPrerelease") is not True:
+              errors.append(
+                  f"isPrerelease must be true, got {release.get('isPrerelease')!r}"
+              )
+          if release.get("isDraft") is not False:
+              errors.append(
+                  f"isDraft must be false (not a checkpoint), got {release.get('isDraft')!r}"
+              )
+          target = release.get("targetCommitish")
+          # GitHub may store a branch name or a full SHA; accept either this SHA
+          # or any non-empty target (tag was reserved at GITHUB_SHA earlier).
+          if not target:
+              errors.append("targetCommitish is empty")
+          elif isinstance(target, str) and len(target) == 40 and target != expected_sha:
+              errors.append(
+                  f"targetCommitish SHA {target!r} != {expected_sha!r}"
+              )
+
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              errors.append("assets is not a list")
+              asset_names = []
+          else:
+              asset_names = [
+                  asset.get("name")
+                  for asset in assets
+                  if isinstance(asset, dict)
+              ]
+          if expected_asset not in asset_names:
+              errors.append(
+                  f"missing asset {expected_asset!r}; have {asset_names!r}"
+              )
+
+          if errors:
+              print("Published release failed prerelease checks:", file=sys.stderr)
+              for error in errors:
+                  print(f"  - {error}", file=sys.stderr)
+              raise SystemExit(1)
+
+          print(
+              f"Verified prerelease {expected_tag} "
+              f"(isPrerelease=true, isDraft=false, asset={expected_asset})"
+          )
+          PY
