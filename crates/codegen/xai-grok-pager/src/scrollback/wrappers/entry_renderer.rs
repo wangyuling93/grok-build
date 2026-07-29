@@ -68,6 +68,10 @@ pub struct EntryRenderer<'a> {
     /// `block_pad_{left,right}` in minimal's `committed_appearance`, content
     /// starts at column 0 (aligned with the welcome card).
     hide_accent: bool,
+    /// Paint the accent bar with [`Modifier::DIM`] on top of its color, so a
+    /// rail that resolved to `Color::Reset` reads as chrome rather than
+    /// full-brightness content.
+    dim_accent: bool,
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<&'a Path>,
 }
@@ -88,6 +92,7 @@ impl<'a> EntryRenderer<'a> {
             group_header_label: None,
             flat_background: false,
             hide_accent: false,
+            dim_accent: false,
             cwd: None,
         }
     }
@@ -111,6 +116,12 @@ impl<'a> EntryRenderer<'a> {
         self
     }
 
+    /// See [`Self::dim_accent`]. Height-neutral — `chrome_width` is unchanged.
+    pub fn with_dim_accent(mut self, dim: bool) -> Self {
+        self.dim_accent = dim;
+        self
+    }
+
     /// Background to paint where the block itself has none (accent column,
     /// gutter, bullets). In flat mode this is `Color::Reset` — the terminal's
     /// own default background — so the entry inherits terminal transparency
@@ -120,6 +131,17 @@ impl<'a> EntryRenderer<'a> {
             ratatui::style::Color::Reset
         } else {
             self.theme.bg_base
+        }
+    }
+
+    /// Shared by every accent branch so the rail cannot be dim in one running
+    /// state and bright in another.
+    fn accent_paint_style(&self, color: ratatui::style::Color) -> Style {
+        let style = Style::default().fg(color);
+        if self.dim_accent {
+            style.add_modifier(ratatui::style::Modifier::DIM)
+        } else {
+            style
         }
     }
 
@@ -809,7 +831,7 @@ impl Renderable for EntryRenderer<'_> {
                 // Pending user input: freeze the running wave. A solid
                 // accent at full color reads as "paused on you" without
                 // the loading-spinner motion.
-                let style = Style::default().fg(color);
+                let style = self.accent_paint_style(color);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
@@ -823,26 +845,24 @@ impl Renderable for EntryRenderer<'_> {
                     let logical_row = skip_rows + row;
                     let brightness =
                         theme::wave_brightness(self.tick, logical_row, wave_rows, WAVE_SPEED);
+                    // theme.blend uses solid_paint so Reset paint stays transparent-safe.
                     let animated_color = self
                         .theme
                         .blend(paint, color, brightness)
                         .unwrap_or(color);
-                    let style = Style::default().fg(animated_color);
+                    let style = self.accent_paint_style(animated_color);
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
             } else if use_collapsed_accent && !self.is_selected {
                 // Dimmed collapsed accent: thin char + blended color.
                 // When the entry is selected, fall through to the static
                 // full-color branch so the selection reads as undimmed.
+                let paint = bg_color.unwrap_or_else(|| self.fallback_bg());
                 let dimmed = self
                     .theme
-                    .blend(
-                        bg_color.unwrap_or_else(|| self.fallback_bg()),
-                        color,
-                        display_cfg.dim_accent,
-                    )
+                    .blend(paint, color, display_cfg.dim_accent)
                     .unwrap_or(color);
-                let style = Style::default().fg(dimmed);
+                let style = self.accent_paint_style(dimmed);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(
                         accent_area.x,
@@ -853,7 +873,7 @@ impl Renderable for EntryRenderer<'_> {
                 }
             } else {
                 // Static accent: full color
-                let style = Style::default().fg(color);
+                let style = self.accent_paint_style(color);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
