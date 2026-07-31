@@ -9,6 +9,7 @@ use std::time::Duration;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
 
+use crate::appearance::AppearanceConfig;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
 use crate::theme::Theme;
@@ -223,7 +224,7 @@ impl BlockContent for BgTaskBlock {
         }
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 
