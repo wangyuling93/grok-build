@@ -7,6 +7,7 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 
 /// Toggle transparent terminal background via `/transparent`.
 pub struct TransparentCommand;
@@ -25,8 +26,10 @@ impl SlashCommand for TransparentCommand {
     }
 
     /// Minimal already draws on the host canvas; no separate toggle.
-    fn available_in_minimal(&self) -> bool {
-        false
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+            why: "minimal already uses the host terminal background",
+        })
     }
 
     fn usage(&self) -> &str {
