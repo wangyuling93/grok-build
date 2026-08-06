@@ -17,12 +17,14 @@ pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
-    persist_setting, sanitize_user_error,
+    EffectMeta, RestoreProgressMsg, SessionFlags, is_disk_full_error,
+    persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
 pub(crate) use transparency_persist::{
     allocate_transparency_persist_generation, flush_transparency_persistence,
 };
+#[cfg(feature = "local-workspace")]
+pub(crate) use helpers::reject_non_fs_only_advertised_tools;
 use helpers::*;
 use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
@@ -72,7 +74,7 @@ pub(crate) fn execute(
         }
         Effect::SetWorkingDir { path } => {
             if let Err(e) = std::env::set_current_dir(&path) {
-                tracing::warn!(error = %e, "project picker: failed to set_current_dir");
+                tracing::warn!(error = %e, "change location: failed to set_current_dir");
             }
         }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
@@ -375,6 +377,7 @@ pub(crate) fn execute(
                             code_restored,
                             restore_summary,
                             restore_degree,
+                            resume_session_id: Some(sid),
                         };
                     }
                     let worktree_id = preferred_session_id
@@ -523,9 +526,9 @@ pub(crate) fn execute(
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
             finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
-            if let Some(true) = session_flags.restore_code {
+            if let Some(rc) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
-                    .insert("x.ai/restore_code".into(), serde_json::Value::Bool(true));
+                    .insert("x.ai/restore_code".into(), serde_json::Value::Bool(rc));
             }
             let cwd = session_cwd.unwrap_or_else(|| cwd.to_path_buf());
             let mcp_started = std::time::Instant::now();
@@ -713,7 +716,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionList { query, seq } => {
+        Effect::FetchSessionList { query, seq, kind_filter } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             tasks
@@ -726,6 +729,19 @@ pub(crate) fn execute(
                         params["query"] = serde_json::Value::String(q.clone());
                     } else {
                         params["allowRelax"] = serde_json::Value::Bool(true);
+                    }
+                    if let Some(kinds) = &kind_filter {
+                        params["_meta"] = serde_json::json!({
+                        "x.ai/facetFilters": { "kind": kinds },
+                    });
+                        tracing::info!(
+                        target: "grok.pager.workspace_mode",
+                        event = "session_list_fetch",
+                        kind_filter = ?kinds,
+                        query = ?query,
+                        seq,
+                        "FetchSessionList with kind facet filter"
+                    );
                     }
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",
@@ -989,8 +1005,11 @@ pub(crate) fn execute(
                             &storage_client,
                             &session_id,
                             &cwd_str,
-                            None,
-                            progress,
+                            xai_grok_shell::session::restore::RestoreSessionOpts {
+                                turn_override: None,
+                                progress,
+                                restore_code: true,
+                            },
                         )
                         .await
                     {
@@ -1179,6 +1198,7 @@ pub(crate) fn execute(
         Effect::SendBashCommand { agent_id, session_id, command, prompt_id } => {
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
+            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     use xai_grok_shell::extensions::prompt_meta::PromptBlockMeta;
@@ -1230,7 +1250,8 @@ pub(crate) fn execute(
                         .and_then(http_status_from_error);
                     TaskResult::PromptResponse {
                         agent_id,
-                        result: result.map_err(|e| e.to_string()),
+                        result: result
+                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1941,14 +1962,6 @@ pub(crate) fn execute(
                 "memory_modal_fullscreen",
                 fullscreen,
                 "memory fullscreen",
-            );
-        }
-        Effect::PersistProjectPickerDisabled { disabled } => {
-            persist_hint(
-                tasks,
-                "project_picker_disabled",
-                disabled,
-                "project picker opt-out",
             );
         }
         Effect::PersistDashboard(persisted) => {
@@ -3565,6 +3578,7 @@ pub(crate) fn execute(
         }
         Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
             let tx = acp_tx.clone();
+            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     let request = acp::ExtRequest::new(
@@ -3599,9 +3613,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::BtwResponse {
                                 agent_id,
-                                result: Err(
-                                    sanitize_user_error(&format!("side question failed: {e}")),
-                                ),
+                                result: Err(format_acp_error(&e, is_api_key_auth)),
                                 minimal_request_id,
                             }
                         }
@@ -4123,6 +4135,7 @@ pub(crate) fn execute(
                                         agent_id,
                                         new_session_id: acp::SessionId::new(sid),
                                         cwd: parent_cwd,
+                                        parent_session_id,
                                     }
                                 }
                                 None => {
@@ -4142,7 +4155,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::HydrateSessionTitleFromDisk { agent_id, session_id, cwd } => {
+        Effect::HydrateSessionMetaFromDisk {
+            agent_id,
+            session_id,
+            cwd,
+            last_turn_summary_gen,
+        } => {
             tasks
                 .spawn(async move {
                     let info = xai_grok_shell::session::info::Info {
@@ -4151,8 +4169,9 @@ pub(crate) fn execute(
                     };
                     let path = xai_grok_shell::session::persistence::session_dir(&info)
                         .join("summary.json");
-                    let title = tokio::task::spawn_blocking(move || -> Option<
-                            (String, bool),
+                    type DiskTitle = (Option<(String, bool)>, Option<String>);
+                    let (title, last_turn_summary) = tokio::task::spawn_blocking(move || -> Option<
+                            DiskTitle,
                         > {
                             let raw = std::fs::read_to_string(path).ok()?;
                             let summary: xai_grok_shell::session::persistence::Summary = serde_json::from_str(
@@ -4161,15 +4180,20 @@ pub(crate) fn execute(
                                 .ok()?;
                             let manual = summary.manual_title_opt();
                             let is_manual = manual.is_some();
-                            let title = manual.or_else(|| summary.display_title_opt())?;
-                            Some((title, is_manual))
+                            let title = manual
+                                .or_else(|| summary.display_title_opt())
+                                .map(|t| (t, is_manual));
+                            Some((title, summary.last_turn_summary))
                         })
                         .await
                         .ok()
-                        .flatten();
-                    TaskResult::SessionTitleFromDisk {
+                        .flatten()
+                        .unwrap_or((None, None));
+                    TaskResult::SessionMetaFromDisk {
                         agent_id,
                         title,
+                        last_turn_summary,
+                        last_turn_summary_gen,
                     }
                 });
         }
@@ -4577,7 +4601,7 @@ fn format_session_info(
         "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
     )
 }
-/// Auth section for `/session-info` — login method + where to manage account/credits.
+/// Auth section for `/session-info` — active login method.
 ///
 /// This reflects the process login / ACP auth method, not per-model sampling
 /// credentials (a model `api_key`/`env_key` can still own the turn).
@@ -4589,12 +4613,10 @@ fn format_auth_lines(is_api_key_auth: bool, api_key_env_set: bool) -> String {
             "  Auth method: API key\n"
         };
         return format!(
-            "{method}  Manage account and credits: console.x.ai\n  Run `grok login` to use your SuperGrok subscription instead.\n"
+            "{method}  Run `grok login` to use your SuperGrok subscription instead.\n"
         );
     }
-    String::from(
-        "  Auth method: OAuth\n  Manage account and credits: https://grok.com/?_s=billing\n",
-    )
+    String::from("  Auth method: OAuth\n")
 }
 /// Build the single text content block for a plain `Effect::SendPrompt`.
 ///

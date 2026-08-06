@@ -16,7 +16,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
     save_config_locked(config).await
 }
 
-/// Save while the caller holds [`SAVE_LOCK`].
+/// [`save_config`] body; caller must hold [`SAVE_LOCK`].
 async fn save_config_locked(config: &Config) -> Result<()> {
     let path = user_config_path();
     let mut root = read_user_root(&path).await?;

@@ -6,6 +6,7 @@
 # cargo check --all-targets --workspace
 # cargo clippy --all-targets --workspace
 # ```
+# Fork keeps the newer pin already in use for local/CI builds.
 channel = "1.97.1"
 components = ["rustfmt", "clippy"]
 profile = "default" # this will override global preferred profile if such is set

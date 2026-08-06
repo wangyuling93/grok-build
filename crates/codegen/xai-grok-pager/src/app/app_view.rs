@@ -348,7 +348,8 @@ impl VoiceState {
         matches!(self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. } if *hold)
     }
 }
-/// Entry in the session picker list on the welcome screen.
+/// Entry from the session list wire: welcome/resume pickers and non-leader
+/// dashboard roster fallback (`session_picker_entry_to_roster`).
 #[derive(Debug, Clone)]
 pub struct SessionPickerEntry {
     pub id: String,
@@ -368,6 +369,9 @@ pub struct SessionPickerEntry {
     pub repo_name: String,
     /// Human-readable worktree label (if the session was created in a named worktree).
     pub worktree_label: Option<String>,
+    /// Per-turn secondary line (`lastTurnSummary` on the session/list wire).
+    /// Used for non-leader roster rows today; reserved for picker display later.
+    pub last_turn_summary: Option<String>,
     /// Lazy-loaded detail for the expanded card view.
     pub card_detail: Option<CardDetail>,
 }
@@ -499,7 +503,7 @@ impl PendingAction {
     }
     /// Like [`Self::new`] but with an explicit confirm window. Used by
     /// the dashboard-overlay stop (Ctrl+X), which mirrors the
-    /// dashboard's [`crate::views::dashboard::state::STOP_CONFIRM_WINDOW`]
+    /// dashboard's [`crate::views::dashboard::state::CONFIRM_WINDOW`]
     /// rather than the default double-press TTL.
     pub fn with_ttl(
         action: Action,
@@ -626,11 +630,6 @@ pub struct AppView {
     pub(crate) pending_transparency_rollback: Option<PendingTransparencyRollback>,
     /// Working directory.
     pub cwd: PathBuf,
-    /// Whether the project picker question has already been shown this session.
-    pub project_picker_shown: bool,
-    /// "Don't ask me again" opt-out from [`xai_grok_shell::util::config::resolve_hints`];
-    /// TUI writes to user `config.toml` only.
-    pub project_picker_disabled: bool,
     /// Whether the cwd is inside a git repository (any ancestor has `.git`).
     /// Pre-computed at startup so dispatch stays free of filesystem I/O.
     pub cwd_has_git_ancestor: bool,
@@ -882,6 +881,12 @@ pub struct AppView {
     pub welcome_privacy_banner_opt_out_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_terms_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_policy_rect: Option<ratatui::layout::Rect>,
+    /// Hit-test rects for the welcome workspace-mode picker.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_workspace_mode_rects: crate::views::welcome::WorkspaceModeHitRects,
+    /// Sticky hover flag for the workspace-mode picker (redraw on enter/leave).
+    #[cfg(feature = "local-workspace")]
+    pub welcome_on_workspace_mode: bool,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
     /// Sticky hover flag for the privacy banner buttons (redraw on enter/leave).
@@ -935,6 +940,7 @@ pub struct AppView {
     /// [`crate::views::session_picker::effective_filter_query`], skips the
     /// local fuzzy re-filter for server search results.
     pub session_picker_entries_query: Option<String>,
+    pub session_picker_pending_delete: Option<crate::views::session_picker::PendingDelete>,
     /// Tick counter for welcome screen spinner animation.
     pub welcome_tick: u64,
     /// Last shimmer frame drawn on the welcome screen. Lets `tick` throttle the
@@ -981,6 +987,22 @@ pub struct AppView {
     /// profiles on create/load while set. `/chat` does **not** set this
     /// (uses [`Self::deferred_startup`] one-shot state instead).
     pub chat_mode: bool,
+    /// Welcome picker mode; ignored when `local_workspace_startup_locked`.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
+    /// CLI/env already stamped local workspace; welcome must not override.
+    #[cfg(feature = "local-workspace")]
+    pub local_workspace_startup_locked: bool,
+    /// One-shot next-session stamp: `Some(None)` sandbox, `Some(cfg)` local.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_session_local_workspace:
+        Option<Option<crate::app::session_startup::LocalWorkspaceConfig>>,
+    /// First-run Local ACK still pending in the TUI.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_local_workspace_ack_pending: bool,
+    /// Next welcome history load is local-disk/build (does not set `chat_mode`).
+    #[cfg(feature = "local-workspace")]
+    pub welcome_history_load_as_build: bool,
     /// Whether mouse capture is currently enabled. Disabled during the
     /// Authenticating state so the terminal handles native text selection.
     pub mouse_captured: bool,
@@ -1024,6 +1046,11 @@ pub struct AppView {
     pub fork_worktree_mode: WorktreeMode,
     /// Restore code state on resume (`--restore-code`).
     pub restore_code: Option<bool>,
+    /// One-shot session id: matching `LoadSession` / worktree resume injects
+    /// `restore_code: false`, then this clears. Used after conversation-only
+    /// remote restore (and remote worktree without `--restore-code`) so agent
+    /// `[cli] restore_code` cannot checkout in-place. Not sticky.
+    pub suppress_code_restore_once: Option<String>,
     /// Startup resume target that missed local id/title resolution and was
     /// deferred to the worktree resume handler (set from materialization).
     /// Worktree failure messages append the no-match hint only for this
@@ -1403,8 +1430,6 @@ impl AppView {
             transparency_persist_generation: 0,
             pending_transparency_rollback: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            project_picker_shown: false,
-            project_picker_disabled: false,
             cwd_has_git_ancestor: std::env::current_dir()
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
@@ -1461,6 +1486,10 @@ impl AppView {
             welcome_privacy_banner_opt_out_rect: None,
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode_rects: Default::default(),
+            #[cfg(feature = "local-workspace")]
+            welcome_on_workspace_mode: false,
             welcome_toast: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
@@ -1484,6 +1513,7 @@ impl AppView {
             session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
+            session_picker_pending_delete: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             cli_model_override: None,
@@ -1499,6 +1529,16 @@ impl AppView {
             subagents: false,
             ask_user: false,
             chat_mode: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
+            #[cfg(feature = "local-workspace")]
+            local_workspace_startup_locked: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_session_local_workspace: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_local_workspace_ack_pending: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -1511,6 +1551,7 @@ impl AppView {
             new_session_worktree_mode: WorktreeMode::Never,
             fork_worktree_mode: WorktreeMode::Ask,
             restore_code: None,
+            suppress_code_restore_once: None,
             resume_local_miss: None,
             agent_override: None,
             bootstrap_acp_commands,
@@ -1601,13 +1642,12 @@ impl AppView {
     /// [`take_deferred_model_switch`](crate::app::dispatch::session::lifecycle::take_deferred_model_switch);
     /// resolving it here would use the pre-session dashboard catalog and a
     /// remapped menu id could resolve differently.
-    pub fn deferred_model_switch_from_cli(
-        &self,
-    ) -> Option<(
-        acp::ModelId,
-        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
-    )> {
-        Some((self.cli_model_override.clone()?, None))
+    pub fn deferred_model_switch_from_cli(&self) -> Option<crate::app::agent::DeferredModelSwitch> {
+        Some(crate::app::agent::DeferredModelSwitch {
+            model_id: self.cli_model_override.clone()?,
+            effort: None,
+            prev_model_id: None,
+        })
     }
     /// Voice capture is armed: the in-prompt dictation overlay can show and
     /// Ctrl+Space can start capture.
@@ -1960,16 +2000,6 @@ impl AppView {
                 .map(|sid| sid.0.as_ref()),
             _ => None,
         }
-    }
-    /// Whether the project picker should intercept the next prompt.
-    pub fn needs_project_picker(&self) -> bool {
-        !self.project_picker_shown
-            && !self.project_picker_disabled
-            && !crate::project_picker::detection::is_project_dir(&self.cwd)
-    }
-    /// Mark the project picker as resolved so it won't fire again.
-    pub fn mark_project_picker_done(&mut self) {
-        self.project_picker_shown = true;
     }
     /// Show a toast on the currently active view.
     ///
@@ -2448,6 +2478,8 @@ impl AppView {
             self.session_picker_loading,
             &self.session_picker_lanes,
         );
+        #[cfg(feature = "local-workspace")]
+        let session_picker_open = self.session_picker_entries.is_some() || sp_loading;
         let outcome = match self.active_view {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
@@ -2511,7 +2543,24 @@ impl AppView {
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
                     sp_source_filter: &mut self.session_picker_source_filter,
+                    sp_pending_delete: &mut self.session_picker_pending_delete,
                     chat_mode: self.chat_mode,
+                    #[cfg(feature = "local-workspace")]
+                    workspace_mode: &mut self.welcome_workspace_mode,
+                    #[cfg(feature = "local-workspace")]
+                    workspace_mode_rects: &self.welcome_workspace_mode_rects,
+                    #[cfg(feature = "local-workspace")]
+                    on_workspace_mode: &mut self.welcome_on_workspace_mode,
+                    #[cfg(feature = "local-workspace")]
+                    workspace_mode_startup_locked: self.local_workspace_startup_locked,
+                    #[cfg(feature = "local-workspace")]
+                    workspace_mode_ack_pending: &mut self.welcome_local_workspace_ack_pending,
+                    #[cfg(feature = "local-workspace")]
+                    history_load_as_build: &mut self.welcome_history_load_as_build,
+                    #[cfg(feature = "local-workspace")]
+                    deferred_startup: &mut self.deferred_startup,
+                    #[cfg(feature = "local-workspace")]
+                    session_picker_open,
                 },
             ),
             ActiveView::Agent(id) => {
@@ -2556,18 +2605,17 @@ impl AppView {
                                 return InputOutcome::Action(Action::DashboardOverlayNext);
                             }
                             Some(crate::actions::ActionId::DashboardOverlayStop) => {
-                                if self
-                                    .agents
-                                    .get(&id)
-                                    .is_some_and(|a| a.session.state.is_turn_running())
-                                {
+                                if self.agents.get(&id).is_some_and(|a| {
+                                    a.session.state.is_turn_running()
+                                        || a.session.state.is_compact_running()
+                                }) {
                                     return InputOutcome::Action(Action::CancelTurn);
                                 }
                                 self.pending_action = Some(PendingAction::with_ttl(
                                     Action::DashboardOverlayStop,
                                     KeyShortcut::from(*key),
                                     Some("close this session"),
-                                    crate::views::dashboard::state::STOP_CONFIRM_WINDOW,
+                                    crate::views::dashboard::state::CONFIRM_WINDOW,
                                 ));
                                 return InputOutcome::Changed;
                             }
@@ -3128,9 +3176,26 @@ struct WelcomeInputCtx<'a> {
     cwd_has_git_ancestor: bool,
     session_picker_grouped: bool,
     sp_source_filter: &'a mut crate::views::session_picker::SourceFilter,
+    sp_pending_delete: &'a mut Option<crate::views::session_picker::PendingDelete>,
     /// Process-wide `--chat`: the session picker hides its source filter
     /// (conversations-only list), so `f` must not cycle it.
     chat_mode: bool,
+    #[cfg(feature = "local-workspace")]
+    workspace_mode: &'a mut crate::views::welcome::WelcomeWorkspaceMode,
+    #[cfg(feature = "local-workspace")]
+    workspace_mode_rects: &'a crate::views::welcome::WorkspaceModeHitRects,
+    #[cfg(feature = "local-workspace")]
+    on_workspace_mode: &'a mut bool,
+    #[cfg(feature = "local-workspace")]
+    workspace_mode_startup_locked: bool,
+    #[cfg(feature = "local-workspace")]
+    workspace_mode_ack_pending: &'a mut bool,
+    #[cfg(feature = "local-workspace")]
+    history_load_as_build: &'a mut bool,
+    #[cfg(feature = "local-workspace")]
+    deferred_startup: &'a mut crate::app::session_startup::DeferredStartupActions,
+    #[cfg(feature = "local-workspace")]
+    session_picker_open: bool,
 }
 /// Welcome view input -- auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
@@ -3271,6 +3336,83 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         }
         return InputOutcome::Unchanged;
     }
+    #[cfg(feature = "local-workspace")]
+    if *ctx.workspace_mode_ack_pending
+        && matches!(ctx.auth_state, AuthState::Done)
+        && ctx.has_access
+        && !ctx.is_zdr_blocked
+    {
+        if let Event::Key(key) = ev {
+            if key.kind == KeyEventKind::Release {
+                return InputOutcome::Unchanged;
+            }
+            if key!('y').matches(key) || key!('Y').matches(key) || key!(Enter).matches(key) {
+                return InputOutcome::Action(Action::ConfirmWelcomeLocalWorkspaceAck);
+            }
+            if key!('n').matches(key) || key!('N').matches(key) || key!(Esc).matches(key) {
+                *ctx.workspace_mode_ack_pending = false;
+                *ctx.workspace_mode = crate::views::welcome::WelcomeWorkspaceMode::Sandbox;
+                let was_worktree = ctx.deferred_startup.worktree;
+                ctx.deferred_startup.worktree = false;
+                ctx.deferred_startup.worktree_label = None;
+                ctx.deferred_startup.worktree_ref = None;
+                if was_worktree {
+                    ctx.deferred_startup.session = None;
+                    ctx.deferred_startup.preferred_session_id = None;
+                }
+                *ctx.history_load_as_build = false;
+                ctx.deferred_startup.history_load_as_build = false;
+                crate::views::welcome::workspace_mode::log_welcome_ack("cancelled");
+                return InputOutcome::Changed;
+            }
+            return InputOutcome::Unchanged;
+        }
+        if matches!(ev, Event::Resize(_, _)) {
+            return InputOutcome::Changed;
+        }
+        return InputOutcome::Unchanged;
+    }
+    #[cfg(feature = "local-workspace")]
+    if crate::views::welcome::workspace_mode::picker_interactive(
+        ctx.chat_mode,
+        ctx.has_access,
+        matches!(ctx.auth_state, AuthState::Done),
+        ctx.is_zdr_blocked,
+        ctx.session_picker_open,
+        ctx.workspace_mode_startup_locked,
+    ) {
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key!('e', CONTROL).matches(key)
+        {
+            *ctx.workspace_mode = ctx.workspace_mode.cycle_next();
+            crate::views::welcome::workspace_mode::log_welcome_mode_selected(
+                *ctx.workspace_mode,
+                "ctrl_e",
+                ctx.workspace_mode_startup_locked,
+            );
+            return InputOutcome::Changed;
+        }
+        if let Event::Mouse(mouse) = ev
+            && matches!(
+                mouse.kind,
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+            )
+            && let Some(mode) = crate::views::welcome::hit_test_workspace_mode(
+                ctx.workspace_mode_rects,
+                mouse.column,
+                mouse.row,
+            )
+        {
+            *ctx.workspace_mode = mode;
+            crate::views::welcome::workspace_mode::log_welcome_mode_selected(
+                mode,
+                "click",
+                ctx.workspace_mode_startup_locked,
+            );
+            return InputOutcome::Changed;
+        }
+    }
     if (ctx.sp_entries.is_some() || ctx.sp_loading) && matches!(ctx.auth_state, AuthState::Done) {
         use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
         let source_filter = *ctx.sp_source_filter;
@@ -3290,6 +3432,19 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         );
         let entry_count = entry_map.len();
         let non_selectable_flags: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
+        let focused_is_foreign = match entry_map
+            .get(ctx.sp_state.selected)
+            .and_then(|entry| entry.as_ref())
+        {
+            Some(PickerItem::Fuzzy { original_index }) => ctx
+                .sp_entries
+                .as_ref()
+                .and_then(|entries| entries.get(*original_index))
+                .is_some_and(|entry| {
+                    crate::app::foreign_sessions::is_foreign_picker_source(&entry.source)
+                }),
+            _ => false,
+        };
         let config = PickerConfig {
             title: Some("Resume session"),
             show_search_hint: true,
@@ -3306,12 +3461,30 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             filter_key_hint: (!ctx.chat_mode).then_some("f"),
             filter_active: !ctx.chat_mode && source_filter.is_active(),
             header_note: None,
-            action_keys: &[],
+            action_keys: if ctx.chat_mode || focused_is_foreign {
+                &[]
+            } else {
+                &[('d', "delete")]
+            },
             disable_search: false,
             compact_bottom_bar: false,
             search_only_on_slash: false,
             vim_normal_first: crate::appearance::cache::load_vim_mode(),
         };
+        match crate::views::session_picker::handle_pending_delete_key(ctx.sp_pending_delete, ev) {
+            crate::views::session_picker::PendingDeleteKey::Confirm(pd) => {
+                return InputOutcome::Action(Action::DeleteSession {
+                    source: pd.source,
+                    session_id: pd.session_id,
+                    cwd: pd.cwd,
+                });
+            }
+            crate::views::session_picker::PendingDeleteKey::Cancel => {
+                return InputOutcome::Changed;
+            }
+            crate::views::session_picker::PendingDeleteKey::Disarmed
+            | crate::views::session_picker::PendingDeleteKey::NotArmed => {}
+        }
         if let Event::Key(key) = ev {
             if key.kind == KeyEventKind::Press
                 && (key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key))
@@ -3339,7 +3512,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 });
             }
         }
+        let selected_before = ctx.sp_state.selected;
         let outcome = handle_picker_input(ev, ctx.sp_state, entry_count, &config);
+        if ctx.sp_pending_delete.is_some() && ctx.sp_state.selected != selected_before {
+            *ctx.sp_pending_delete = None;
+        }
         match outcome {
             PickerOutcome::Selected(i) => match entry_map.get(i).and_then(|e| e.as_ref()) {
                 Some(PickerItem::Fuzzy { original_index }) => {
@@ -3359,9 +3536,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 None => return InputOutcome::Changed,
             },
             PickerOutcome::SubmitQuery => {
-                let query = ctx.sp_state.query().trim().to_string();
-                if !query.is_empty() {
-                    return InputOutcome::Action(Action::LoadSession(query, None, false));
+                if let Some(sid) =
+                    crate::views::session_picker::session_id_for_direct_load(ctx.sp_state.query())
+                {
+                    return InputOutcome::Action(Action::LoadSession(sid.to_string(), None, false));
                 }
                 return InputOutcome::Unchanged;
             }
@@ -3369,6 +3547,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 *ctx.sp_entries = None;
                 ctx.sp_state.reset();
                 *ctx.sp_source_filter = crate::views::session_picker::SourceFilter::default();
+                *ctx.sp_pending_delete = None;
                 return InputOutcome::Action(Action::SessionPickerClosed);
             }
             PickerOutcome::Expand(i) => {
@@ -3461,6 +3640,16 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             PickerOutcome::FilterCycled => {
                 return InputOutcome::Action(Action::CycleSessionSourceFilter);
+            }
+            PickerOutcome::Action('d') => {
+                *ctx.sp_pending_delete =
+                    crate::views::session_picker::pending_delete_from_selection(
+                        ctx.sp_state.selected,
+                        &entry_map,
+                        ctx.sp_entries.as_deref(),
+                        ctx.sp_content_results.as_deref(),
+                    );
+                return InputOutcome::Changed;
             }
             PickerOutcome::NonSelectableClick(_)
             | PickerOutcome::TabChanged(_)
@@ -3819,6 +4008,20 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if over_upgrade != *ctx.on_upgrade_cta {
                     *ctx.on_upgrade_cta = over_upgrade;
                     return InputOutcome::Changed;
+                }
+                #[cfg(feature = "local-workspace")]
+                {
+                    let over_ws = ctx
+                        .workspace_mode_rects
+                        .row
+                        .is_some_and(|r| r.contains(pos));
+                    if over_ws != *ctx.on_workspace_mode {
+                        *ctx.on_workspace_mode = over_ws;
+                        return InputOutcome::Changed;
+                    }
+                    if over_ws {
+                        return InputOutcome::Changed;
+                    }
                 }
                 let over_banner = ctx
                     .privacy_banner_opt_in_rect
@@ -4352,6 +4555,9 @@ impl AppView {
                             subscription_tier: self.subscription_tier.as_deref(),
                             session_picker_grouped: self.session_picker_grouped,
                             session_picker_source_filter: self.session_picker_source_filter,
+                            session_picker_pending_delete: self
+                                .session_picker_pending_delete
+                                .is_some(),
                             chat_mode: self.chat_mode,
                             credit_balance: self.credit_balance.as_ref(),
                             auto_topup: self.auto_topup.as_ref(),
@@ -4362,6 +4568,12 @@ impl AppView {
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             upgrade_cta: hero_cta.map(|(_owner, label, _)| label),
                             privacy_banner,
+                            #[cfg(feature = "local-workspace")]
+                            workspace_mode: self.welcome_workspace_mode,
+                            #[cfg(feature = "local-workspace")]
+                            workspace_mode_startup_locked: self.local_workspace_startup_locked,
+                            #[cfg(feature = "local-workspace")]
+                            workspace_mode_ack_pending: self.welcome_local_workspace_ack_pending,
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -4384,6 +4596,10 @@ impl AppView {
                             result.privacy_banner_opt_out_rect;
                         self.welcome_privacy_banner_terms_rect = result.privacy_banner_terms_rect;
                         self.welcome_privacy_banner_policy_rect = result.privacy_banner_policy_rect;
+                        #[cfg(feature = "local-workspace")]
+                        {
+                            self.welcome_workspace_mode_rects = result.workspace_mode_rects;
+                        }
                         self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             crate::views::welcome::paint_welcome_toast(
@@ -4517,6 +4733,7 @@ impl AppView {
                             } else {
                                 None
                             };
+                        let overlay_can_cycle = position.is_some_and(|(_, n)| n > 1);
                         let (agent_area, header) = if overlay_active {
                             let theme = crate::theme::Theme::current();
                             let title = agents
@@ -4606,6 +4823,7 @@ impl AppView {
                                 },
                                 &self.bundle_state,
                                 overlay_active,
+                                overlay_can_cycle,
                                 link_spans,
                                 AppRenderParams {
                                     voice_available,
@@ -4725,6 +4943,7 @@ impl AppView {
                                                     crate::app::agent_view::BannerSlotParams::none(
                                                     ),
                                                     bundle_state,
+                                                    false,
                                                     false,
                                                     link_spans,
                                                     AppRenderParams {
@@ -5714,8 +5933,6 @@ pub(crate) mod tests {
             transparency_persist_generation: 0,
             pending_transparency_rollback: None,
             cwd: std::path::PathBuf::from("/tmp"),
-            project_picker_shown: true,
-            project_picker_disabled: false,
             cwd_has_git_ancestor: false,
             acp_tx: tx,
             scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -5750,6 +5967,16 @@ pub(crate) mod tests {
             subagents: false,
             ask_user: false,
             chat_mode: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
+            #[cfg(feature = "local-workspace")]
+            local_workspace_startup_locked: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_session_local_workspace: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_local_workspace_ack_pending: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -5762,6 +5989,7 @@ pub(crate) mod tests {
             new_session_worktree_mode: WorktreeMode::Never,
             fork_worktree_mode: WorktreeMode::Ask,
             restore_code: None,
+            suppress_code_restore_once: None,
             resume_local_miss: None,
             agent_override: None,
             bootstrap_acp_commands: Vec::new(),
@@ -5834,6 +6062,10 @@ pub(crate) mod tests {
             welcome_privacy_banner_opt_out_rect: None,
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode_rects: Default::default(),
+            #[cfg(feature = "local-workspace")]
+            welcome_on_workspace_mode: false,
             welcome_toast: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
@@ -5857,6 +6089,7 @@ pub(crate) mod tests {
             session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
+            session_picker_pending_delete: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             startup_warnings: Vec::new(),
@@ -6351,6 +6584,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "r".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         };
         if let Some(crate::views::modal::ActiveModal::SessionPicker { entries, .. }) =
@@ -7677,6 +7911,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "tmp-repo".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }
     }
@@ -9631,6 +9866,7 @@ pub(crate) mod tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -9676,6 +9912,7 @@ pub(crate) mod tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -9726,6 +9963,7 @@ pub(crate) mod tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -11427,6 +11665,25 @@ pub(crate) mod tests {
             "Ctrl+X must be intercepted before the agent sees it",
         );
     }
+    /// Overlay Ctrl+X during `/compact` cancels compaction (same as `[stop]`).
+    #[test]
+    fn overlay_ctrl_x_compact_running_cancels_without_arming() {
+        use crate::app::agent::{AgentCommand, AgentState};
+        let (mut app, id) = neutral_overlay_app();
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "Ctrl+X during /compact must cancel, got {outcome:?}",
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "Ctrl+X during /compact must not arm close confirm",
+        );
+    }
     /// Overlay Ctrl+X on a non-turn busy agent (command in flight,
     /// cancel pending) — `Action::CancelTurn` would no-op for these
     /// states, so the press arms the two-press close instead of
@@ -11435,10 +11692,6 @@ pub(crate) mod tests {
     fn overlay_ctrl_x_command_or_cancelling_agent_arms_close_confirm() {
         use crate::app::agent::{AgentCommand, AgentState};
         let states = [
-            AgentState::CommandRunning {
-                command: AgentCommand::Compact,
-                started_at: std::time::Instant::now(),
-            },
             AgentState::TurnCancelling,
             AgentState::CommandCancelling {
                 command: AgentCommand::Compact,
@@ -11693,30 +11946,6 @@ pub(crate) mod tests {
             "ExitSession intercept must NOT remove the agent (it only closes the popup)",
         );
     }
-    #[test]
-    fn needs_project_picker_false_when_disabled() {
-        let mut app = test_app();
-        app.project_picker_shown = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        app.project_picker_disabled = true;
-        assert!(!app.needs_project_picker());
-    }
-    #[test]
-    fn needs_project_picker_false_when_already_shown() {
-        let mut app = test_app();
-        app.project_picker_shown = true;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        app.project_picker_disabled = false;
-        assert!(!app.needs_project_picker());
-    }
-    #[test]
-    fn needs_project_picker_true_for_non_project_dir() {
-        let mut app = test_app();
-        app.project_picker_shown = false;
-        app.project_picker_disabled = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        assert!(app.needs_project_picker());
-    }
     /// Chat mode hides the welcome picker's source filter, so `f` must not
     /// cycle it; Build mode keeps the cycle.
     #[test]
@@ -11735,6 +11964,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "r".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         };
         let f_key = Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
@@ -11760,5 +11990,184 @@ pub(crate) mod tests {
             outcome,
             InputOutcome::Action(Action::CycleSessionSourceFilter)
         ));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_ctrl_e_cycles_workspace_mode() {
+        use crate::views::welcome::WelcomeWorkspaceMode;
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let outcome = app.handle_input(&key);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace
+        );
+        let _ = app.handle_input(&key);
+        assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_ack_cancel_clears_history_bypass() {
+        use crate::views::welcome::WelcomeWorkspaceMode;
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        app.welcome_local_workspace_ack_pending = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.welcome_history_load_as_build = true;
+        app.deferred_startup.worktree = true;
+        app.deferred_startup.history_load_as_build = true;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(!app.welcome_local_workspace_ack_pending);
+        assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
+        assert!(
+            !app.welcome_history_load_as_build,
+            "ACK cancel must drop history bypass"
+        );
+        assert!(!app.deferred_startup.history_load_as_build);
+        assert!(!app.deferred_startup.worktree);
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_workspace_click_selects_mode() {
+        use crate::views::welcome::{WelcomeWorkspaceMode, WorkspaceModeHitRects};
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        app.welcome_workspace_mode_rects = WorkspaceModeHitRects {
+            options: [
+                Some(ratatui::layout::Rect::new(10, 5, 9, 1)),
+                Some(ratatui::layout::Rect::new(20, 5, 17, 1)),
+            ],
+            row: Some(ratatui::layout::Rect::new(0, 5, 80, 1)),
+        };
+        let click = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 25,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        let outcome = app.handle_input(&click);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_workspace_locked_ignores_cycle_and_click() {
+        use crate::views::welcome::{WelcomeWorkspaceMode, WorkspaceModeHitRects};
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        app.local_workspace_startup_locked = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.welcome_workspace_mode_rects = WorkspaceModeHitRects {
+            options: [
+                Some(ratatui::layout::Rect::new(10, 5, 9, 1)),
+                Some(ratatui::layout::Rect::new(20, 5, 17, 1)),
+            ],
+            row: Some(ratatui::layout::Rect::new(0, 5, 80, 1)),
+        };
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            app.handle_input(&key),
+            InputOutcome::Unchanged | InputOutcome::Changed
+        ));
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace
+        );
+        let click = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 12,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        let _ = app.handle_input(&click);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace,
+            "locked picker must not change selection"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_ctrl_e_ignored_while_history_picker_open() {
+        use crate::views::welcome::WelcomeWorkspaceMode;
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        app.session_picker_entries = Some(vec![]);
+        app.session_picker_state.set_query("keep-me");
+        let before = app.welcome_workspace_mode;
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let outcome = app.handle_input(&key);
+        assert_eq!(app.welcome_workspace_mode, before);
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::ForceDeepSearch)),
+            "history open: Ctrl+E must not cycle or soft-refresh: {outcome:?}"
+        );
+        assert_eq!(app.session_picker_state.query(), "keep-me");
+        let _ = WelcomeWorkspaceMode::Sandbox;
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_ctrl_e_ignored_while_authenticating() {
+        use crate::views::welcome::WelcomeWorkspaceMode;
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Authenticating {
+            request_seq: 1,
+            handle: None,
+            auth_url: None,
+            mode: AuthMode::Command,
+        };
+        app.trust_state = TrustState::Done;
+        assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let _ = app.handle_input(&key);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::Sandbox,
+            "Ctrl+E must not cycle mode before auth is Done"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_ctrl_e_ignored_when_zdr_blocked() {
+        use crate::views::welcome::WelcomeWorkspaceMode;
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        app.is_zdr = true;
+        app.zdr_access_enabled = false;
+        assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let _ = app.handle_input(&key);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::Sandbox,
+            "Ctrl+E must not cycle mode on ZDR-blocked welcome"
+        );
     }
 }
