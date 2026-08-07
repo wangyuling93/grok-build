@@ -105,7 +105,6 @@ impl Theme {
 
             accent_plan: BRIGHT_YELLOW,
             accent_verify: BRIGHT_BLUE,
-            accent_feedback: BRIGHT_GREEN,
             accent_remember: GREEN,
 
             selection_border: SEL_BG,

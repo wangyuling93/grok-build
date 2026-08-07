@@ -190,7 +190,6 @@ pub fn theme_from_ghostty(scheme: &GhosttyScheme) -> Theme {
 
         accent_plan: rgb(bright_yellow),
         accent_verify: rgb(bright_blue),
-        accent_feedback: rgb(bright_cyan),
         accent_remember: rgb(green),
 
         selection_border: rgb(sel_fg),

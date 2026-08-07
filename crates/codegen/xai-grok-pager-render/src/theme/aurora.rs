@@ -111,7 +111,6 @@ impl Theme {
 
             accent_plan: YELLOW,
             accent_verify: WHITE,
-            accent_feedback: CYAN,
             accent_remember: GREEN,
 
             selection_border: SEL_FG,
