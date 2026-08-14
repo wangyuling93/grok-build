@@ -1558,6 +1558,14 @@ pub(crate) async fn run(
     crate::theme::cache::set_transparent_background(
         app.current_ui.transparent_background_enabled(),
     );
+    // Apply the remote soft default for text selection (flash | hold | word_select) when the
+    // user has set none locally; an explicit local `keep_text_selection` always wins.
+    crate::appearance::cache::apply_remote_keep_text_selection_default(
+        remote_settings
+            .as_ref()
+            .and_then(|s| s.keep_text_selection_default.as_deref()),
+        &app.current_ui,
+    );
     // Re-derive the render-value compact flag from the hydrated `current_ui`:
     // the seed above used the pre-hydration disk read, which layered/remote
     // config can contradict — the canonical single-writer corrects it (and
