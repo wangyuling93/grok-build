@@ -11,7 +11,6 @@ use xai_grok_pager::app::agent::{QueueEntryKind, QueuedPrompt};
 use xai_grok_pager::{
     app::bundle::BundleState,
     appearance::LayoutConfig,
-    diff::DiffLine,
     scrollback::{EntryId, ScrollbackEntry, block::RenderBlock},
     theme::{Theme, ThemeKind, cache},
     views::{
@@ -19,6 +18,7 @@ use xai_grok_pager::{
         subagent_catalog_pane::SubagentCatalogPane,
     },
 };
+use xai_grok_pager_diff::DiffLine;
 
 fn set_transparency(enabled: bool) {
     cache::set(ThemeKind::GrokNight);
