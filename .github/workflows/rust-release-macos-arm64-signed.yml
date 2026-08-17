@@ -12,9 +12,13 @@
 #   APPLE_ID
 #   APPLE_TEAM_ID
 #
-# A private draft release checkpoints the signed DMG for reruns; notarization
-# diagnostics stay on Actions artifacts (not release assets). The cleanup
-# workflow expires those internal checkpoints after 30 days.
+# The signed (pre-staple) DMG is checkpointed in an Actions cache keyed by
+# run id. That cache survives failed-job reruns and "Re-run all jobs"
+# (which delete artifacts). It never appears on the Releases page. If GitHub
+# evicts the cache, the next attempt signs a new generation; Apple
+# submission names include the DMG SHA so a replacement cannot resume a
+# ticket for different bytes. Notarization diagnostics stay on Actions
+# artifacts.
 #
 # Run:
 #   - Automatically on push to main (build, sign, notarize, create/update GitHub
@@ -487,157 +491,41 @@ jobs:
       name: codesigning
       deployment: false
     permissions:
-      contents: write
+      actions: write
+      contents: read
     outputs:
-      checkpoint_release_tag: ${{ steps.checkpoint-store.outputs.release_tag }}
       signed_dmg_sha256: ${{ steps.checkpoint.outputs.signed_dmg_sha256 }}
     env:
       BINARY_PATH: dist/unsigned/grok
-      CHECKPOINT_ASSET_NAME: grok-aarch64-apple-darwin.dmg
-      CHECKPOINT_RELEASE_TAG: grok-notary-checkpoint-${{ github.run_id }}
+      CHECKPOINT_CACHE_KEY: grok-macos-arm64-signed-checkpoint-${{ github.run_id }}
       DMG_PATH: dist/release-assets/grok-aarch64-apple-darwin.dmg
 
     steps:
-      # Actions artifacts are deleted when GitHub performs "Re-run all jobs".
-      # A draft release is private to repository writers and keeps the exact
-      # signed DMG bytes for the lifetime of the run. Notarization phase JSON
-      # is kept only as an Actions artifact, never as a release asset.
-      - name: Resolve durable signed-DMG checkpoint
+      # Exact-key restore only: a prefix match could reuse another run's DMG.
+      # A miss is cache-hit=false (first attempt). A service error fails the
+      # step so it cannot be mistaken for a miss and trigger a re-sign.
+      - name: Restore durable signed-DMG checkpoint
+        id: checkpoint-restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.DMG_PATH }}
+          key: ${{ env.CHECKPOINT_CACHE_KEY }}
+
+      - name: Verify restored signed-DMG checkpoint
         id: checkpoint-store
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          CACHE_HIT: ${{ steps.checkpoint-restore.outputs.cache-hit }}
         run: |
           set -euo pipefail
-          release_json="${RUNNER_TEMP}/notary-checkpoint-release.json"
-          incomplete_assets="${RUNNER_TEMP}/notary-checkpoint-incomplete-assets.txt"
-
-          view_error="${RUNNER_TEMP}/notary-checkpoint-view.stderr"
-
-          # Resolve the checkpoint draft into "$release_json", distinguishing a
-          # genuine "does not exist yet" (HTTP 404) from a transient API
-          # failure. Conflating them lets a transient error fall through to
-          # `gh release create`; because a draft release owns no git tag ref,
-          # GitHub would then mint a SECOND draft with the same tag and orphan
-          # the immutable signed-DMG checkpoint. Exit: 0 present, 2 absent.
-          resolve_checkpoint_release() {
-            local attempt
-            for attempt in 1 2 3 4 5; do
-              if gh release view "$CHECKPOINT_RELEASE_TAG" \
-                --repo "$GITHUB_REPOSITORY" \
-                --json databaseId,isDraft,tagName,targetCommitish,assets \
-                > "$release_json" 2> "$view_error"; then
-                return 0
-              fi
-              if grep -qiE 'release not found|HTTP 404' "$view_error"; then
-                return 2
-              fi
-              sed -n '1,20p' "$view_error" >&2
-              echo "Checkpoint release lookup attempt ${attempt}/5 failed transiently." >&2
-              [[ "$attempt" -lt 5 ]] && sleep "$((attempt * 5))"
-            done
-            echo "Could not determine checkpoint release state after retries; refusing to risk a duplicate draft." >&2
-            return 1
-          }
-
-          set +e
-          resolve_checkpoint_release
-          resolve_status="$?"
-          set -e
-          if [[ "$resolve_status" -eq 1 ]]; then
-            exit 1
+          if [[ "$CACHE_HIT" != "true" ]]; then
+            echo "checkpoint_found=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          if [[ "$resolve_status" -eq 2 ]]; then
-            gh release create "$CHECKPOINT_RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft \
-              --target "$GITHUB_SHA" \
-              --title "Internal macOS notarization checkpoint for run ${GITHUB_RUN_ID}" \
-              --notes "Private durable state for GitHub Actions run ${GITHUB_RUN_ID}. Do not publish or edit while that run may be retried."
-            set +e
-            resolve_checkpoint_release
-            resolve_status="$?"
-            set -e
-            if [[ "$resolve_status" -ne 0 ]]; then
-              echo "Checkpoint release not resolvable immediately after creation; a later rerun will retry." >&2
-              exit 1
-            fi
-          fi
-
-          python3 - \
-            "$release_json" \
-            "$CHECKPOINT_RELEASE_TAG" \
-            "$GITHUB_SHA" \
-            "$CHECKPOINT_ASSET_NAME" \
-            "$GITHUB_OUTPUT" \
-            "$incomplete_assets" <<'PY'
-          import json
-          import re
-          import sys
-
-          (
-              path,
-              expected_tag,
-              expected_sha,
-              asset_name,
-              output_path,
-              incomplete_assets_path,
-          ) = sys.argv[1:]
-          with open(path, encoding="utf-8") as release_file:
-              release = json.load(release_file)
-          if not isinstance(release, dict):
-              raise SystemExit("Malformed checkpoint release response")
-          if release.get("isDraft") is not True:
-              raise SystemExit("Checkpoint release must remain a draft")
-          if release.get("tagName") != expected_tag:
-              raise SystemExit("Checkpoint release tag mismatch")
-          if release.get("targetCommitish") != expected_sha:
-              raise SystemExit(
-                  f"Checkpoint commit mismatch: {release.get('targetCommitish')!r} != {expected_sha!r}"
-              )
-          release_id = release.get("databaseId")
-          if not isinstance(release_id, int) or release_id <= 0:
-              raise SystemExit("Invalid checkpoint release ID")
-          assets = release.get("assets")
-          if not isinstance(assets, list):
-              raise SystemExit("Malformed checkpoint release assets")
-          matches = [asset for asset in assets if asset.get("name") == asset_name]
-          if len(matches) > 1:
-              raise SystemExit(f"Multiple checkpoint assets named {asset_name!r}")
-          checkpoint_found = False
-          incomplete_asset_ids = []
-          if matches:
-              asset = matches[0]
-              asset_state = asset.get("state")
-              if asset_state == "uploaded":
-                  checkpoint_found = True
-              elif asset_state in {"open", "starter"}:
-                  api_url = asset.get("apiUrl")
-                  match = re.search(r"/releases/assets/([1-9][0-9]*)$", str(api_url))
-                  if match is None:
-                      raise SystemExit("Invalid API URL for incomplete signed-DMG asset")
-                  incomplete_asset_ids.append(match.group(1))
-              else:
-                  raise SystemExit(
-                      f"Unexpected signed-DMG checkpoint asset state: {asset_state!r}"
-                  )
-          with open(output_path, "a", encoding="utf-8") as output_file:
-              output_file.write(f"release_id={release_id}\n")
-              output_file.write(f"release_tag={expected_tag}\n")
-              output_file.write(
-                  f"checkpoint_found={'true' if checkpoint_found else 'false'}\n"
-              )
-          with open(incomplete_assets_path, "w", encoding="utf-8") as asset_file:
-              for asset_id in incomplete_asset_ids:
-                  asset_file.write(f"{asset_id}\n")
-          PY
-
-          while IFS= read -r asset_id; do
-            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
-            echo "Deleting incomplete signed-DMG checkpoint asset ${asset_id}."
-            gh api --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
-          done < "$incomplete_assets"
+          test -f "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          echo "checkpoint_found=true" >> "$GITHUB_OUTPUT"
 
       # Fail fast on invalid notarization credentials before the expensive
       # signing work. Notarization itself runs in a later job; without this an
@@ -673,21 +561,6 @@ jobs:
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --keychain "$keychain_path" \
             --validate
-
-      - name: Restore durable signed-DMG checkpoint
-        if: ${{ steps.checkpoint-store.outputs.checkpoint_found == 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$DMG_PATH")"
-          gh release download "$CHECKPOINT_RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$CHECKPOINT_ASSET_NAME" \
-            --output "$DMG_PATH"
-          hdiutil verify "$DMG_PATH"
-          codesign --verify --strict --verbose=2 "$DMG_PATH"
 
       - name: Download unsigned Grok binary
         if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
@@ -904,6 +777,25 @@ jobs:
             "$DMG_PATH"
           codesign --verify --strict --verbose=2 "$DMG_PATH"
 
+      # save is a no-op if this run-id key already exists, so a false miss
+      # cannot replace the leased bytes. Re-restore afterward and hash *those*
+      # bytes: otherwise this job would publish a newly signed SHA while
+      # notarize reloads the old lease, and "Re-run failed jobs" would loop.
+      - name: Persist signed DMG before notarization
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.DMG_PATH }}
+          key: ${{ env.CHECKPOINT_CACHE_KEY }}
+
+      - name: Reload leased signed-DMG checkpoint
+        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.DMG_PATH }}
+          key: ${{ env.CHECKPOINT_CACHE_KEY }}
+          fail-on-cache-miss: true
+
       - name: Checkpoint signed DMG
         id: checkpoint
         shell: bash
@@ -921,37 +813,10 @@ jobs:
           {
             echo "### Signed DMG notarization checkpoint"
             echo
-            echo "- Durable draft release: \`${CHECKPOINT_RELEASE_TAG}\`"
+            echo "- Durable cache key: \`${CHECKPOINT_CACHE_KEY}\`"
             echo "- Reused existing checkpoint: \`${{ steps.checkpoint-store.outputs.checkpoint_found }}\`"
             echo "- Pre-submit SHA-256: \`${signed_dmg_sha256}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Persist signed DMG before notarization
-        if: ${{ steps.checkpoint-store.outputs.checkpoint_found != 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA256: ${{ steps.checkpoint.outputs.signed_dmg_sha256 }}
-        run: |
-          set -euo pipefail
-          verification_dir="${RUNNER_TEMP}/checkpoint-verification"
-          mkdir -p "$verification_dir"
-
-          # Do not use --clobber: an existing asset is an immutable lease on the
-          # exact bytes that all reruns must reuse.
-          gh release upload "$CHECKPOINT_RELEASE_TAG" "$DMG_PATH" \
-            --repo "$GITHUB_REPOSITORY"
-          gh release download "$CHECKPOINT_RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$CHECKPOINT_ASSET_NAME" \
-            --output "${verification_dir}/${CHECKPOINT_ASSET_NAME}"
-          persisted_sha256="$(
-            shasum -a 256 "${verification_dir}/${CHECKPOINT_ASSET_NAME}" | awk '{print $1}'
-          )"
-          if [[ "$persisted_sha256" != "$EXPECTED_SHA256" ]]; then
-            echo "Persisted signed-DMG checkpoint hash mismatch." >&2
-            exit 1
-          fi
 
       - name: Delete temporary signing keychain
         if: always()
@@ -972,13 +837,10 @@ jobs:
       name: codesigning
       deployment: false
     permissions:
-      # contents: write is required so GITHUB_TOKEN can see *draft* checkpoint
-      # releases (read alone yields "release not found" for drafts). This job
-      # only downloads the signed DMG; it does not upload release assets.
-      contents: write
+      actions: read
+      contents: read
     env:
-      CHECKPOINT_ASSET_NAME: grok-aarch64-apple-darwin.dmg
-      CHECKPOINT_RELEASE_TAG: ${{ needs.sign-and-checkpoint.outputs.checkpoint_release_tag }}
+      CHECKPOINT_CACHE_KEY: grok-macos-arm64-signed-checkpoint-${{ github.run_id }}
       DMG_PATH: dist/release-assets/grok-aarch64-apple-darwin.dmg
       # NOTARY_SUBMISSION_NAME is derived at runtime from the signed DMG's
       # SHA-256 (first step below) so it is unique per byte-generation.
@@ -999,16 +861,11 @@ jobs:
           echo "NOTARY_SUBMISSION_NAME=grok-notary-${GITHUB_REPOSITORY_ID}-${GITHUB_RUN_ID}-${SIGNED_DMG_SHA256:0:16}.dmg" >> "$GITHUB_ENV"
 
       - name: Download exact signed DMG checkpoint
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$DMG_PATH")"
-          gh release download "$CHECKPOINT_RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$CHECKPOINT_ASSET_NAME" \
-            --output "$DMG_PATH"
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.DMG_PATH }}
+          key: ${{ env.CHECKPOINT_CACHE_KEY }}
+          fail-on-cache-miss: true
 
       - name: Import notarization credentials
         shell: bash
@@ -1050,7 +907,7 @@ jobs:
           upload_path="${RUNNER_TEMP}/${NOTARY_SUBMISSION_NAME}"
           mkdir -p "$report_dir"
 
-          : "${CHECKPOINT_RELEASE_TAG:?Missing durable checkpoint release tag}"
+          : "${CHECKPOINT_CACHE_KEY:?Missing durable checkpoint cache key}"
           : "${NOTARY_SUBMISSION_NAME:?Missing notarization submission name}"
           : "${SIGNED_DMG_SHA256:?Missing signed DMG SHA-256}"
           [[ "$SIGNED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -1077,7 +934,7 @@ jobs:
             "$intent_path" \
             "$GITHUB_RUN_ID" \
             "$GITHUB_SHA" \
-            "$CHECKPOINT_RELEASE_TAG" \
+            "$CHECKPOINT_CACHE_KEY" \
             "$NOTARY_SUBMISSION_NAME" \
             "$SIGNED_DMG_SHA256" <<'PY'
           import json
@@ -1087,7 +944,7 @@ jobs:
               path,
               run_id,
               source_commit,
-              checkpoint_release_tag,
+              checkpoint_cache_key,
               submission_name,
               sha256,
           ) = sys.argv[1:]
@@ -1096,7 +953,7 @@ jobs:
                   {
                       "workflowRunId": run_id,
                       "sourceCommit": source_commit,
-                      "checkpointReleaseTag": checkpoint_release_tag,
+                      "checkpointCacheKey": checkpoint_cache_key,
                       "submissionName": submission_name,
                       "signedDmgSha256": sha256,
                   },
@@ -1110,8 +967,8 @@ jobs:
           echo "NOTARY_UPLOAD_PATH=${upload_path}" >> "$GITHUB_ENV"
 
       # Single resolver: poll Apple history by deterministic name, then submit
-      # only if still absent. Report JSON is an Actions artifact only; the
-      # signed-DMG checkpoint is the only durable GitHub release asset.
+      # only if still absent. Report JSON is an Actions artifact; the signed
+      # DMG checkpoint lives in the run-id cache, not on the Releases page.
       - name: Resolve Apple submission
         shell: bash
         run: |
@@ -1346,7 +1203,7 @@ jobs:
             "$submission_source" \
             "$GITHUB_RUN_ID" \
             "$GITHUB_SHA" \
-            "$CHECKPOINT_RELEASE_TAG" \
+            "$CHECKPOINT_CACHE_KEY" \
             "$NOTARY_SUBMISSION_NAME" \
             "$SIGNED_DMG_SHA256" \
             "$GITHUB_RUN_ATTEMPT" <<'PY'
@@ -1360,7 +1217,7 @@ jobs:
               source,
               run_id,
               source_commit,
-              checkpoint_release_tag,
+              checkpoint_cache_key,
               submission_name,
               sha256,
               run_attempt,
@@ -1371,7 +1228,7 @@ jobs:
                   {
                       "workflowRunId": run_id,
                       "sourceCommit": source_commit,
-                      "checkpointReleaseTag": checkpoint_release_tag,
+                      "checkpointCacheKey": checkpoint_cache_key,
                       "submissionName": submission_name,
                       "signedDmgSha256": sha256,
                       "submissionId": submission_id,
@@ -1391,7 +1248,7 @@ jobs:
             echo "- Submission ID: \`${submission_id}\`"
             echo "- Submission name: \`${NOTARY_SUBMISSION_NAME}\`"
             echo "- Submission source: \`${submission_source}\`"
-            echo "- Signed-DMG checkpoint release: \`${CHECKPOINT_RELEASE_TAG}\`"
+            echo "- Signed-DMG checkpoint cache: \`${CHECKPOINT_CACHE_KEY}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
 
@@ -1718,7 +1575,7 @@ jobs:
           prerelease: true
 
       # Fail closed: auto-run and manual publish must leave a real prerelease
-      # (not a draft checkpoint) with the signed DMG attached.
+      # (not a draft) with the signed DMG attached.
       - name: Verify GitHub prerelease
         shell: bash
         env:
