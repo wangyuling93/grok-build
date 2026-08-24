@@ -296,7 +296,7 @@ const HUNK_TRACKER_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "agent_only",
         display: "Agent only",
-        description: "Track only files the agent edits (default).",
+        description: "Track only files the agent edits.",
     },
     EnumChoice {
         canonical: "all_dirty",
@@ -306,7 +306,7 @@ const HUNK_TRACKER_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "off",
         display: "Off",
-        description: "Disable hunk tracking entirely. Also disables LOC tracking.",
+        description: "Disable hunk tracking entirely (default). Also disables LOC tracking.",
     },
 ];
 
@@ -1392,7 +1392,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "hunk", "tracker", "tracking", "diff", "changes", "git", "loc", "off", "disable",
             ],
             kind: SettingKind::Enum {
-                default: "agent_only",
+                default: "off",
                 choices: HUNK_TRACKER_MODE_CHOICES,
                 supports_preview: false,
             },

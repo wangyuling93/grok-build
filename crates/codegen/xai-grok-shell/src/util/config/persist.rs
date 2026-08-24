@@ -47,6 +47,8 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     } else {
         merge_section(table, "skills", &config.skills);
     }
+    merge_section(table, "telemetry", &config.telemetry);
+    merge_section(table, "features", &config.features);
 
     write_user_root(&path, &root).await
 }
