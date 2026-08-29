@@ -1,5 +1,3 @@
-//! Menu component — renders shortcut key menus.
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -29,8 +27,8 @@ pub fn render_menu(
         .add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(theme.gray_bright);
 
-    // Width: label + gap + key. Keep a 4-col gap between label and key for
-    // readability.
+    // Width: label + gap + key
+    // Keep a 4-col gap between label and key for readability
     let content_min: u16 = items
         .iter()
         .map(|(key, label)| cols(key) + cols(label) + 4)
@@ -91,7 +89,7 @@ pub fn render_menu(
             key_width,
         );
 
-        // [x] dismiss affordance restyling (for the import row)
+        // Restyle the [x] dismiss control (for the import row)
         if let Some(x_offset) = key.rfind("[x]") {
             let key_x_start = menu_centered.x + menu_centered.width - key_width;
             let dismiss_start = key_x_start + x_offset as u16;
