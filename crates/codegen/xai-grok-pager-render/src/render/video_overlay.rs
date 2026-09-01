@@ -1,7 +1,6 @@
 //! Video playback overlay chrome (border, title, progress bar).
 //!
-//! The video frame itself is rendered via post-flush escape sequences
-//! by the caller, matching the image viewer pattern.
+//! The video frame itself is rendered via post-flush escape sequences by the caller, matching the image viewer pattern.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,8 +12,8 @@ use crate::prompt_images::VideoViewerState;
 use crate::render::safe_buf::SafeBuf;
 use crate::theme::Theme;
 
-/// Render the video viewer popup chrome. Returns the popup `Rect`,
-/// or `None` if the area is too small.
+/// Render the video viewer popup chrome.
+/// Returns the popup `Rect`, or `None` if the area is too small.
 ///
 /// Chrome fill uses `theme.bg_base` (see-through under transparent mode);
 /// backdrop dimming uses [`Theme::design_canvas`].
