@@ -319,6 +319,63 @@ mod tests {
         });
     }
 
+    /// While the terminal-theme rollout gate is off, a typed `/theme terminal` (or alias) is an unknown name whose error listing omits it, and it drops out of the suggestions.
+    #[test]
+    fn run_terminal_rejected_and_unlisted_while_gated_off() {
+        with_test_env(|| {
+            theme_cache::set_terminal_theme_enabled(false);
+            let cmd = ThemeCommand;
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = CommandExecCtx {
+                models: &models,
+                session_id: None,
+                bundle_state: &bundle,
+                screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                pager_state: crate::settings::PagerLocalSnapshot {
+                    multiline_mode: false,
+                    yolo_mode: false,
+                    ..crate::settings::PagerLocalSnapshot::default()
+                },
+            };
+            for name in ["terminal", "transparent"] {
+                match cmd.run(&mut ctx, name) {
+                    CommandResult::Error(msg) => {
+                        assert!(msg.contains("Unknown theme"), "got: {msg}");
+                        let listing = msg.split("Available:").nth(1).expect("listing");
+                        assert!(!listing.contains("terminal"), "gated name listed: {msg}");
+                    }
+                    other => panic!("expected CommandResult::Error, got {other:?}"),
+                }
+            }
+            let app_ctx = AppCtx {
+                models: &models,
+                cwd: std::path::Path::new("."),
+                has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
+                screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
+            };
+            let items = cmd.suggest_args(&app_ctx, "").expect("should return items");
+            assert!(
+                items.iter().all(|i| i.insert_text != "terminal"),
+                "gated theme must not be suggested"
+            );
+
+            theme_cache::set_terminal_theme_enabled(true);
+            match cmd.run(&mut ctx, "terminal") {
+                CommandResult::Action(Action::SetTheme(name)) => assert_eq!(name, "terminal"),
+                other => panic!("expected Action::SetTheme(\"terminal\"), got {other:?}"),
+            }
+        });
+    }
+
     /// `/theme` (no args) toggles by dispatching `Action::SetTheme(<next>)`.
     /// Asserts first that `ThemeKind::available()` has at least 2 entries so a broken invariant fails loudly instead of being masked.
     #[test]

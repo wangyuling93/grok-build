@@ -212,11 +212,6 @@ pub fn confirm_cursor(phase: &RewindPhase) -> RewindInput {
 }
 
 /// Hit-test a screen position against the rewind overlay's clickable rows.
-///
-/// Returns the logical cursor index under `(col, row)` for the current phase, or `None` if the position is not on a selectable row.
-///
-/// IMPORTANT: the row geometry here mirrors `render_rewind_overlay`.
-/// Keep this, `render_rewind_overlay`, and `rewind_overlay_height` in sync when changing layout.
 pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Option<usize> {
     if area.height == 0 || area.width < 10 {
         return None;
@@ -574,11 +569,7 @@ fn render_radio_row(
     panel_focused: bool,
     theme: &Theme,
 ) {
-    let bg = if is_cursor && panel_focused {
-        theme.bg_visual
-    } else {
-        theme.bg_light
-    };
+    let bg = theme.bg_light;
 
     let row_rect = Rect {
         x: x.saturating_sub(1),
@@ -616,6 +607,9 @@ fn render_radio_row(
         Span::styled(label.to_string(), label_style),
     ]);
     buf.set_line(x, y, &line, w);
+    if is_cursor && panel_focused {
+        buf.set_style(row_rect, theme.selection_overlay());
+    }
 }
 
 #[cfg(test)]

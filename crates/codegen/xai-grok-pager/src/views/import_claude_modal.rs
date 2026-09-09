@@ -191,11 +191,7 @@ impl ImportClaudeModalState {
         plan
     }
 
-    /// Handle a mouse event. Recognizes:
-    /// - Left click on an item row: focus and toggle that item.
-    /// - Left click on a section/type header: focus and tri-state toggle (selects all if any unselected, deselects all if everything selected).
-    /// - Scroll wheel: scroll up/down through the content.
-    /// - Clicks outside the content area are ignored.
+    /// Handle a mouse event. Recognizes.
     pub fn handle_mouse(
         &mut self,
         kind: crossterm::event::MouseEventKind,

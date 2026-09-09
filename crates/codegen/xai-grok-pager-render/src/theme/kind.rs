@@ -51,6 +51,9 @@ pub enum ThemeKind {
     Sakura,
     /// Ghostty Aurora — first-class (hand-mapped TUI chrome).
     Aurora,
+    /// Every bg is `Reset` so the terminal canvas shows through; legible on both polarities without appearance detection.
+    /// Hidden and unparseable while `cache::terminal_theme_enabled()` is off.
+    Terminal,
     /// Meta-variant: follow system dark/light appearance.
     ///
     /// Never stored as the live palette — resolved to a concrete theme
@@ -70,6 +73,7 @@ impl ThemeKind {
         ThemeKind::OscuraMidnight,
         ThemeKind::Sakura,
         ThemeKind::Aurora,
+        ThemeKind::Terminal,
     ];
 
     /// Number of Ghostty catalog schemes shown in pickers.
@@ -88,18 +92,57 @@ impl ThemeKind {
         }
     }
 
+    /// [`ALL`] minus gated `terminal`. Ignores color capability ([`available()`] filters that).
+    #[must_use]
+    pub fn selectable() -> &'static [ThemeKind] {
+        if super::cache::terminal_theme_enabled() {
+            Self::ALL
+        } else {
+            static GATED: OnceLock<Vec<ThemeKind>> = OnceLock::new();
+            GATED
+                .get_or_init(|| {
+                    ThemeKind::ALL
+                        .iter()
+                        .copied()
+                        .filter(|kind| !kind.is_terminal_native())
+                        .collect()
+                })
+                .as_slice()
+        }
+    }
+
     /// Built-in + Ghostty catalog kinds selectable on this terminal.
     ///
-    /// Without truecolor, only GrokNight / GrokDay. With truecolor, built-ins
-    /// first, then the full catalog. Cached for the process.
+    /// Without truecolor, GrokNight / GrokDay (and `terminal` when the rollout
+    /// gate is on). With truecolor, [`selectable()`] first, then the full catalog.
+    /// Cached for the process; the terminal-theme gate picks between caches.
     #[must_use]
     pub fn available() -> &'static [ThemeKind] {
         if !color_support::detect().has_truecolor() {
-            const NO_TRUECOLOR: &[ThemeKind] = &[ThemeKind::GrokNight, ThemeKind::GrokDay];
-            return NO_TRUECOLOR;
+            if super::cache::terminal_theme_enabled() {
+                static NO_TRUECOLOR: OnceLock<Vec<ThemeKind>> = OnceLock::new();
+                return NO_TRUECOLOR
+                    .get_or_init(|| {
+                        ThemeKind::ALL
+                            .iter()
+                            .copied()
+                            .filter(|kind| !kind.requires_truecolor())
+                            .collect()
+                    })
+                    .as_slice();
+            }
+            const NO_TRUECOLOR_GATED: &[ThemeKind] = &[ThemeKind::GrokNight, ThemeKind::GrokDay];
+            return NO_TRUECOLOR_GATED;
         }
-        static FULL: OnceLock<Vec<ThemeKind>> = OnceLock::new();
-        FULL.get_or_init(build_full_available).as_slice()
+        if super::cache::terminal_theme_enabled() {
+            static FULL: OnceLock<Vec<ThemeKind>> = OnceLock::new();
+            FULL.get_or_init(|| build_full_available(true)).as_slice()
+        } else {
+            static FULL_GATED: OnceLock<Vec<ThemeKind>> = OnceLock::new();
+            FULL_GATED
+                .get_or_init(|| build_full_available(false))
+                .as_slice()
+        }
     }
 
     /// Settings / config picker: `auto` then every concrete theme (no truecolor filter).
@@ -108,18 +151,15 @@ impl ThemeKind {
     /// `EnumChoice` without re-listing built-ins or re-filtering the catalog.
     #[must_use]
     pub fn settings_theme_rows() -> &'static [ThemePickerRow] {
-        static ROWS: OnceLock<Vec<ThemePickerRow>> = OnceLock::new();
-        ROWS.get_or_init(|| {
-            let mut out = Vec::with_capacity(1 + ThemeKind::ALL.len() + GHOSTTY_SCHEMES.len());
-            out.push(ThemePickerRow {
-                canonical: "auto",
-                display: "Auto",
-                description: "Follow system dark/light appearance.",
-            });
-            out.extend(concrete_picker_rows());
-            out
-        })
-        .as_slice()
+        if super::cache::terminal_theme_enabled() {
+            static ROWS: OnceLock<Vec<ThemePickerRow>> = OnceLock::new();
+            ROWS.get_or_init(|| build_settings_rows(true)).as_slice()
+        } else {
+            static ROWS_GATED: OnceLock<Vec<ThemePickerRow>> = OnceLock::new();
+            ROWS_GATED
+                .get_or_init(|| build_settings_rows(false))
+                .as_slice()
+        }
     }
 
     /// Concrete themes only (settings `auto_dark` / `auto_light` — no `auto` row).
@@ -141,6 +181,7 @@ impl ThemeKind {
             Self::OscuraMidnight => "oscura-midnight",
             Self::Sakura => "sakura",
             Self::Aurora => "aurora",
+            Self::Terminal => "terminal",
             Self::Auto => "auto",
             Self::Ghostty(i) => GHOSTTY_SCHEMES
                 .get(i as usize)
@@ -160,6 +201,7 @@ impl ThemeKind {
             Self::OscuraMidnight => "Oscura Midnight",
             Self::Sakura => "Sakura",
             Self::Aurora => "Aurora",
+            Self::Terminal => "Terminal",
             Self::Auto => "Auto",
             Self::Ghostty(i) => GHOSTTY_SCHEMES
                 .get(i as usize)
@@ -178,12 +220,9 @@ impl ThemeKind {
             Self::TokyoNight => "Dark + blue-tinted; needs truecolor.",
             Self::RosePineMoon => "Muted dark with mauve accents; needs truecolor.",
             Self::OscuraMidnight => "Deep dark with warm accents; needs truecolor.",
-            Self::Sakura => {
-                "Ghostty Sakura — dark plum with magenta blossom; needs truecolor."
-            }
-            Self::Aurora => {
-                "Ghostty Aurora — dark slate with amber/cyan accents; needs truecolor."
-            }
+            Self::Sakura => "Ghostty Sakura — dark plum with magenta blossom; needs truecolor.",
+            Self::Aurora => "Ghostty Aurora — dark slate with amber/cyan accents; needs truecolor.",
+            Self::Terminal => "Your terminal's own colors; no background of its own.",
             Self::Ghostty(_) => "Ghostty terminal color scheme; needs truecolor.",
         }
     }
@@ -192,7 +231,7 @@ impl ThemeKind {
     #[must_use]
     pub fn requires_truecolor(self) -> bool {
         match self {
-            Self::GrokNight | Self::GrokDay | Self::Auto => false,
+            Self::GrokNight | Self::GrokDay | Self::Auto | Self::Terminal => false,
             Self::TokyoNight
             | Self::RosePineMoon
             | Self::OscuraMidnight
@@ -217,6 +256,9 @@ impl ThemeKind {
             "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
             "sakura" | "cherry" | "cherry-blossom" => Some(Self::Sakura),
             "aurora" | "northern-lights" => Some(Self::Aurora),
+            "terminal" | "terminal-default" | "transparent" | "native" => {
+                super::cache::terminal_theme_enabled().then_some(Self::Terminal)
+            }
             other => Self::from_catalog_name(other, name),
         }
     }
@@ -224,7 +266,9 @@ impl ThemeKind {
     /// Resolve a Ghostty catalog name (slug, `ghostty-*` config key, or display).
     fn from_catalog_name(lower: &str, original: &str) -> Option<Self> {
         // Disambiguated config keys from [`COLLIDING_CATALOG`].
-        if let Some(&(slug, _)) = COLLIDING_CATALOG.iter().find(|&&(_, config)| config == lower)
+        if let Some(&(slug, _)) = COLLIDING_CATALOG
+            .iter()
+            .find(|&&(_, config)| config == lower)
         {
             return ghostty_catalog::scheme_by_slug(slug).map(|(i, _)| Self::Ghostty(i));
         }
@@ -245,6 +289,12 @@ impl ThemeKind {
         matches!(self, Self::Auto)
     }
 
+    /// Whether this kind paints the terminal-native palette ([`Theme::terminal_default`]) instead of an RGB palette, and so needs the same polarity-safe rendering paths as minimal mode's lock.
+    #[must_use]
+    pub fn is_terminal_native(self) -> bool {
+        self == Self::Terminal
+    }
+
     /// Unquantized palette for this kind (design RGB, no paint-mode flags).
     ///
     /// `Auto` maps to [`Theme::groknight`] — the same nominal default the
@@ -259,6 +309,7 @@ impl ThemeKind {
             Self::OscuraMidnight => Theme::oscura_midnight(),
             Self::Sakura => Theme::sakura(),
             Self::Aurora => Theme::aurora(),
+            Self::Terminal => Theme::terminal(),
             Self::Ghostty(i) => ghostty::theme_from_ghostty_index(i),
         }
     }
@@ -284,6 +335,7 @@ impl ThemeKind {
             Self::OscuraMidnight => 5,
             Self::Sakura => 6,
             Self::Aurora => 7,
+            Self::Terminal => 8,
             // High bit marks Ghostty catalog index in the low 16 bits.
             Self::Ghostty(i) => 0x8000_0000 | u32::from(i),
         }
@@ -305,6 +357,7 @@ impl ThemeKind {
             5 => Self::OscuraMidnight,
             6 => Self::Sakura,
             7 => Self::Aurora,
+            8 => Self::Terminal,
             _ => Self::GrokNight,
         }
     }
@@ -334,26 +387,34 @@ fn catalog_config_slug(scheme: &ghostty_catalog::GhosttyScheme) -> &'static str 
         .unwrap_or(scheme.slug)
 }
 
-/// First-class built-ins, then every catalog index as [`ThemeKind::Ghostty`].
-fn concrete_theme_kinds() -> impl Iterator<Item = ThemeKind> {
+/// First-class built-ins (optionally including `terminal`), then every catalog index as [`ThemeKind::Ghostty`].
+fn concrete_theme_kinds(include_terminal: bool) -> impl Iterator<Item = ThemeKind> {
     ThemeKind::ALL
         .iter()
         .copied()
+        .filter(move |kind| include_terminal || !kind.is_terminal_native())
         .chain((0..GHOSTTY_SCHEMES.len() as u16).map(ThemeKind::Ghostty))
 }
 
-fn build_full_available() -> Vec<ThemeKind> {
-    concrete_theme_kinds().collect()
+fn build_full_available(include_terminal: bool) -> Vec<ThemeKind> {
+    concrete_theme_kinds(include_terminal).collect()
 }
 
-fn concrete_picker_rows() -> Vec<ThemePickerRow> {
-    concrete_theme_kinds()
-        .map(|kind| ThemePickerRow {
+fn build_settings_rows(include_terminal: bool) -> Vec<ThemePickerRow> {
+    let mut out = Vec::with_capacity(1 + ThemeKind::ALL.len() + GHOSTTY_SCHEMES.len());
+    out.push(ThemePickerRow {
+        canonical: "auto",
+        display: "Auto",
+        description: "Follow system dark/light appearance.",
+    });
+    out.extend(
+        concrete_theme_kinds(include_terminal).map(|kind| ThemePickerRow {
             canonical: kind.display_name(),
             display: kind.label(),
             description: kind.description(),
-        })
-        .collect()
+        }),
+    );
+    out
 }
 
 #[cfg(test)]
@@ -397,6 +458,7 @@ mod tests {
         assert!(!ThemeKind::OscuraMidnight.is_auto());
         assert!(!ThemeKind::Sakura.is_auto());
         assert!(!ThemeKind::Aurora.is_auto());
+        assert!(!ThemeKind::Terminal.is_auto());
     }
 
     #[test]
@@ -442,6 +504,29 @@ mod tests {
         assert_eq!(ThemeKind::from_name("sakura"), Some(ThemeKind::Sakura));
         assert_eq!(ThemeKind::from_name("cherry"), Some(ThemeKind::Sakura));
         assert_eq!(ThemeKind::from_name("aurora"), Some(ThemeKind::Aurora));
+    }
+
+    /// With the rollout gate off, the `terminal` theme neither parses nor appears in any catalog; on, both come back.
+    #[test]
+    fn terminal_rollout_gate_hides_and_rejects_the_terminal_theme() {
+        let _guard = super::super::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::super::cache::reset_for_test();
+
+        super::super::cache::set_terminal_theme_enabled(false);
+        for name in ["terminal", "terminal-default", "transparent", "native"] {
+            assert_eq!(ThemeKind::from_name(name), None, "{name} must not parse");
+        }
+        assert!(!ThemeKind::selectable().contains(&ThemeKind::Terminal));
+        assert!(!ThemeKind::available().contains(&ThemeKind::Terminal));
+
+        super::super::cache::set_terminal_theme_enabled(true);
+        assert_eq!(ThemeKind::from_name("terminal"), Some(ThemeKind::Terminal));
+        assert!(ThemeKind::selectable().contains(&ThemeKind::Terminal));
+        assert!(ThemeKind::available().contains(&ThemeKind::Terminal));
+
+        super::super::cache::reset_for_test();
     }
 
     #[test]
@@ -502,17 +587,19 @@ mod tests {
 
         let avail = ThemeKind::available();
         if color_support::detect().has_truecolor() {
+            let first_class = ThemeKind::selectable();
             assert!(avail.len() > 500);
-            assert_eq!(&avail[..ThemeKind::ALL.len()], ThemeKind::ALL);
+            assert_eq!(&avail[..first_class.len()], first_class);
             assert_eq!(
                 avail.len(),
-                ThemeKind::ALL.len() + ThemeKind::catalog_picker_count()
+                first_class.len() + ThemeKind::catalog_picker_count()
             );
             assert_eq!(ThemeKind::catalog_picker_count(), GHOSTTY_SCHEMES.len());
         }
 
         assert_eq!(ThemeKind::GrokNight.encode(), 0);
         assert_eq!(ThemeKind::Aurora.encode(), 7);
+        assert_eq!(ThemeKind::Terminal.encode(), 8);
         if let ThemeKind::Ghostty(i) = dracula {
             assert_eq!(dracula.encode(), 0x8000_0000 | u32::from(i));
         }
@@ -540,6 +627,9 @@ mod tests {
         assert!(Theme::aurora().is_dark());
         assert!(!Theme::grokday().is_dark());
         for &kind in ThemeKind::ALL {
+            if kind.is_terminal_native() {
+                continue;
+            }
             assert_eq!(
                 kind.is_dark(),
                 kind.to_theme().is_dark(),
@@ -596,13 +686,15 @@ mod tests {
     fn catalog_slugs_colliding_with_first_class_are_declared() {
         for scheme in GHOSTTY_SCHEMES {
             let Some(kind) = ThemeKind::from_name(scheme.slug) else {
-                panic!("catalog slug `{}` is unreachable via from_name", scheme.slug);
+                panic!(
+                    "catalog slug `{}` is unreachable via from_name",
+                    scheme.slug
+                );
             };
             match kind {
                 ThemeKind::Ghostty(i) => {
                     assert_eq!(
-                        GHOSTTY_SCHEMES[i as usize].slug,
-                        scheme.slug,
+                        GHOSTTY_SCHEMES[i as usize].slug, scheme.slug,
                         "slug `{}` must map to its own index",
                         scheme.slug
                     );
@@ -631,11 +723,9 @@ mod tests {
         if !color_support::detect().has_truecolor() {
             return;
         }
-        let kinds: Vec<_> = concrete_theme_kinds().collect();
+        let kinds: Vec<_> =
+            concrete_theme_kinds(super::super::cache::terminal_theme_enabled()).collect();
         assert_eq!(kinds.as_slice(), ThemeKind::available());
-        assert_eq!(
-            ThemeKind::settings_concrete_theme_rows().len(),
-            kinds.len()
-        );
+        assert_eq!(ThemeKind::settings_concrete_theme_rows().len(), kinds.len());
     }
 }

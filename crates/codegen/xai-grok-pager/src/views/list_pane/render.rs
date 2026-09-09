@@ -407,10 +407,8 @@ impl<T: ListItem> ListPane<'_, T> {
                 );
             }
 
-            // --- Post-pass 3: Truncation ellipsis ---
-            // If the item's full wrapped height exceeds its allocated layout height, place "…" on the last rendered row
-            // This only triggers in NoWrap mode (where item_h == 1 regardless of content length)
-            // Viewport clipping does not trigger this; only true text truncation does
+            // This only triggers in NoWrap mode (where item_h == 1 regardless of content length). Viewport
+            // clipping does not trigger this; only true text truncation does.
             if item.desired_height(area.width) > item_h && rows_to_render > 0 {
                 let last_y = cursor_y + rows_to_render - 1;
                 render_truncation_ellipsis(buf, last_y, area.x, area.width);
@@ -425,14 +423,8 @@ impl<T: ListItem> ListPane<'_, T> {
 // Truncation ellipsis
 // ---------------------------------------------------------------------------
 
-/// Place a `…` at the end of text on row `y` to indicate truncation.
-///
-/// Scans from right to left for the rightmost non-space cell.
-/// If there is room after it (text doesn't fill the full width), the `…` is appended.
-/// If the text fills the exact width, the last character is replaced; this matches the convention in VS Code, `less`, `bat`, and Vim.
-///
-/// The `…` inherits the `fg` color from the adjacent text cell and preserves
-/// the cell's existing `bg` (e.g., selection highlight).
+/// Place a `…` at the end of text on row `y` to indicate truncation. If there is room after it
+/// (text doesn't fill the full width), the `…` is appended.
 fn render_truncation_ellipsis(buf: &mut Buffer, y: u16, x_start: u16, width: u16) {
     if width == 0 {
         return;
@@ -466,11 +458,9 @@ fn render_truncation_ellipsis(buf: &mut Buffer, y: u16, x_start: u16, width: u16
 // Corner overlay indicators
 // ---------------------------------------------------------------------------
 
-/// Render single-character corner indicators for scroll position and follow mode.
-///
-/// - Top-right: `▲` (dim) when content is scrolled down (more above).
-/// - Bottom-right: `◆` (dim) in follow mode, `▼` (dim) when more content below,
-///   or nothing when at the bottom in NAV mode.
+/// Render single-character corner indicators for scroll position and follow mode. Top-right: `▲`
+/// (dim) when content is scrolled down (more above). Bottom-right: `◆` (dim) in follow mode, `▼`
+/// (dim) when more content below, or nothing when at the bottom in NAV mode.
 fn render_corner_indicators(
     area: Rect,
     buf: &mut Buffer,
@@ -487,10 +477,6 @@ fn render_corner_indicators(
     let bottom_right = (area.x + area.width - 1, area.y + area.height - 1);
 
     // Helper: place an indicator with `… ` padding if it overwrites content.
-    // The result looks like `content… ▼`: truncation ellipsis, a space, then the indicator
-    //
-    // Preserves each cell's bg (e.g., selection highlight)
-    // The `…` inherits the overwritten content's fg color; the indicator uses the given fg
     let place_indicator =
         |buf: &mut Buffer, pos: (u16, u16), symbol: &str, fg: ratatui::style::Color| {
             // Check if the indicator or the cell just before it has content.
@@ -534,10 +520,9 @@ fn render_corner_indicators(
 // Input bar rendering
 // ---------------------------------------------------------------------------
 
-/// Render the bottom bar: active input bar or accepted matcher status.
-///
-/// When the input bar is open: a left-aligned editable `search: ` or `filter: ` label and the textarea.
-/// When a matcher is accepted (bar closed): right-aligned dim status.
+/// Render the bottom bar: active input bar or accepted matcher status. When the input bar is open:
+/// a left-aligned editable `search: ` or `filter: ` label and the textarea. When a matcher is
+/// accepted (bar closed): right-aligned dim status.
 fn render_bottom_bar(
     area: Rect,
     buf: &mut Buffer,
@@ -1185,11 +1170,9 @@ mod tests {
         );
     }
 
-    /// Regression: search highlight in Wrap mode with multi-span styled content.
-    ///
-    /// Tracing entries have ANSI-parsed styled spans.
-    /// The search_text() is plain (ANSI-stripped), but the content() has multiple styled spans.
-    /// Wrap positions and highlight byte offsets must stay in sync.
+    /// Regression: search highlight in Wrap mode with multi-span styled content. Tracing entries have
+    /// ANSI-parsed styled spans. The search_text() is plain (ANSI-stripped), but the content() has
+    /// multiple styled spans. Wrap positions and highlight byte offsets must stay in sync.
     #[test]
     fn highlight_match_wrap_mode_styled_spans() {
         use ratatui::style::Color;
@@ -1604,16 +1587,7 @@ mod tests {
 
     #[test]
     fn scrollbar_width_mismatch_bug_repro() {
-        // Documents the scrollbar width mismatch issue
-        //
-        // Root cause (without the fix):
-        // 1. prepare_layout() computes heights at width W (114)
-        // 2. The scrollbar reduces the render width to W-2 (112)
-        // 3. The item needs more lines at the narrower width
-        // 4. The layout allocates fewer rows than needed, so lines are truncated
-        //
-        // This test verifies the bug exists at the item level
-        // The fix in prepare_layout computes at the narrow width instead
+        // Documents the scrollbar width mismatch issue. Root cause (without the fix).
         use crate::render::wrapping::word_wrap_line;
 
         let layout_width: u16 = 114;
@@ -1644,11 +1618,9 @@ mod tests {
 
     #[test]
     fn scrollbar_width_fix_verified() {
-        // Verifies the prepare_layout fix works end-to-end.
-        //
-        // The fix: compute at the narrow width when a scrollbar is needed
-        // Phase 1: vis_count > viewport means the scrollbar is definite, so compute at width-2
-        // Phase 2: total_height > viewport triggers a fallback recompute at width-2
+        // Verifies the prepare_layout fix works end-to-end. The fix: compute at the narrow width when a
+        // scrollbar is needed. Phase 1: vis_count > viewport means the scrollbar is definite, so compute
+        // at width-2. Phase 2: total_height > viewport triggers a fallback recompute at width-2.
         let full_width: u16 = 114;
         let narrow_width: u16 = 112;
 
